@@ -4,6 +4,8 @@
 
 #define IDS_APP_TITLE			103
 
+#define IDI_ICON1 101
+
 #define IDR_MAINFRAME			128
 #define IDD_MEDIAPLAYER_DIALOG	102
 #define IDD_ABOUTBOX			103
@@ -26,5 +28,8 @@
 #define _APS_NEXT_COMMAND_VALUE		32771
 #define _APS_NEXT_CONTROL_VALUE		1000
 #define _APS_NEXT_SYMED_VALUE		110
+
+#define IDI_ICON1 101
+
 #endif
 #endif
