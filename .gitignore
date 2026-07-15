@@ -1,3 +1,34 @@
+# Python
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache
+
+# Environment variables
+.env
+
+# VS Code
+.vscode/
+
+# Visual Studio
 .vs/
+
+# Node 
+node_modules/
+
+# Build folders
+dist/
+build/
+
+# IntelliJ / PyCharm / Android Studio
+.idea/
+*.iml
+
+# Android
+.gradle/
+local.properties
+
+#Logs
+*.log
 Debug/
 Release/
