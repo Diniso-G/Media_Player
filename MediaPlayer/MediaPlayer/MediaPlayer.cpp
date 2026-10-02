@@ -1,3 +1,4 @@
+//Headers, constants, colours
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0A00
 #endif
@@ -78,6 +79,7 @@ static Color ColTextDim() { return Color(225, 150, 150, 176); }
 static Color ColIcon() { return Color(225, 224, 224, 236); }
 static Color ColIconOff() { return Color(225, 84, 84, 104); }
 
+//Smart pointer, global state and helpers
 template <class T>
 class Com {
 public:
@@ -143,7 +145,7 @@ static float g_seekFrac = 0.0f, g_hoverFrac = 0.0f;
 static ULONG_PTR g_gdiplusToken = 0;
 
 static float SF(float v) { return v * (float)g_dpi / 96.0f; }
-static int SI(float v) { return v * (int)(SF(v) + 96.0f); }
+static int SI(float v) { return (int)(SF(v) + 0.5f); }
 static float Clamp01(float v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
 
 static std::wstring FormatTime(MFTIME t) {
@@ -151,9 +153,9 @@ static std::wstring FormatTime(MFTIME t) {
 	long long secs = t / 10000000LL;
 	wchar_t buf[32];
 	if (secs >= 3600)
-		swprintf_s(buf, 32, L"%11d:%0211d:%0211d", secs / 3600, (secs / 60) % 60, secs % 60);
+		swprintf_s(buf, 32, L"%02I64d:%02I64d:%02I64d", secs / 3600, (secs / 60) % 60, secs % 60);
 	else 
-		swprintf_s(buf, 32, L"%11d:%0211d", secs / 60, secs % 60);
+		swprintf_s(buf, 32, L"%02I64d:%02I64d", secs / 60, secs % 60);
 	return buf;
 }
 
@@ -175,6 +177,7 @@ static void InvalidateStage() {
 }
 
 
+//Settings(volume and recent files)
 static const wchar_t* kRegKey = L"Software\\DesktopMediaPlayer";
 
 static void LoadSettings() {
@@ -217,6 +220,7 @@ static void AddRecent(const std::wstring& path) {
 }
 
 
+//Media foundation session callback
 class SessionCallback final : public IMFAsyncCallback {
 public:
 	SessionCallback(HWND hwnd, IMFMediaSession* s, DWORD gen) : m_hwnd(hwnd), m_session(s), m_gen(gen), m_cRef(1) {
@@ -294,6 +298,7 @@ private:
 static SessionCallback* g_pCallback = nullptr;
 
 
+//Topology
 static HRESULT AddBranch(IMFTopology* topo, IMFPresentationDescriptor* pd, IMFStreamDescriptor* sd, HWND videoHwnd, bool* isVideo) {
 	
 	Com<IMFMediaTypeHandler> handler;
@@ -334,7 +339,7 @@ static HRESULT AddBranch(IMFTopology* topo, IMFPresentationDescriptor* pd, IMFSt
 	return src->ConnectOutput(0, sink.get(), 0);
 }
 
-static HRESULT CreateTopology(IMFTopology** ppTopo, bool** hasVideo) {
+static HRESULT CreateTopology(IMFTopology** ppTopo, bool* hasVideo) {
 	Com<IMFTopology> topo;
 	HRESULT hr = MFCreateTopology(topo.put());
 	if (FAILED(hr)) return hr;
@@ -353,7 +358,8 @@ static HRESULT CreateTopology(IMFTopology** ppTopo, bool** hasVideo) {
 			bool isVideo = false;
 			if (SUCCEEDED(AddBranch(topo.get(), pd.get(), sd.get(), g_hwndVideo, &isVideo))) {
 				connected++;
-				if (isVideo) *hasVideo = true;
+				if (isVideo) 
+					*hasVideo = true;
 			}
 		}
 	}
@@ -363,4 +369,70 @@ static HRESULT CreateTopology(IMFTopology** ppTopo, bool** hasVideo) {
 	(*ppTopo)->AddRef();
 	return S_OK;
 }
+
+
+//Layout, fullscreen and autohide
+static RECT g_stageRect = {};
+static void Layout() {
+	if (!g_hwndMain) return;
+	RECT rc;
+	GetClientRect(g_hwndMain, &rc);
+	int w = rc.right, h = rc.bottom;
+	int barH = SI(kBarHeight);
+
+	int stageH = g_fullscreen ? h : max(0, h - barH);
+	g_stageRect = { 0, 0, w, stageH };
+
+	if (g_hwndVideo) {
+		MoveWindow(g_hwndVideo, 0, 0, w, stageH, TRUE);
+		ShowWindow(g_hwndVideo, g_hasVideo ? SW_SHOWNA : SW_HIDE);
+	}
+	if (g_hwndCtl) {
+		MoveWindow(g_hwndCtl, 0, h - barH, w, barH, TRUE);
+		SetWindowPos(g_hwndCtl, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+		bool show = !g_fullscreen || !g_uiHidden;
+		ShowWindow(g_hwndCtl, show ? SW_SHOWNA : SW_HIDE);
+	}
+	if (g_pVideoControl) {
+		RECT vr = { 0, 0, w, stageH };
+		g_pVideoControl->SetVideoPosition(nullptr, &vr);
+	}
+	InvalidateRect(g_hwndMain, nullptr, FALSE);
+}
+
+static void ActivityPing() {
+	g_lastActivity = GetTickCount64();
+	if (g_uiHidden) {
+		g_uiHidden = false;
+		if (g_hwndCtl && g_fullscreen) ShowWindow(g_hwndCtl, SW_SHOWNA);
+		SetCursor(LoadCursor(nullptr, IDC_ARROW));
+	}
+}
+
+static void ToggleFullscreen() {
+	HWND hwnd = g_hwndMain;
+	if (!g_fullscreen) {
+		g_prevStyle = GetWindowLongPtr(hwnd, GWL_STYLE);
+		g_prevPlacement.length = sizeof(g_prevPlacement);
+		GetWindowPlacement(hwnd, &g_prevPlacement);
+		MONITORINFO mi = { sizeof(mi) };
+		GetMonitorInfo(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi);
+		g_fullscreen = true;
+		SetWindowLongPtr(hwnd, GWL_STYLE, g_prevStyle & ~WS_OVERLAPPEDWINDOW);
+		SetWindowPos(hwnd, g_topmost ? HWND_TOPMOST : HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top, SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+	}
+	else {
+		g_fullscreen = false;
+		g_uiHidden = false;
+		SetWindowLongPtr(hwnd, GWL_STYLE, g_prevStyle);
+		SetWindowPlacement(hwnd, &g_prevPlacement);
+		SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+	}
+	ActivityPing();
+	Layout();
+	InvalidateControls();
+}
+
+
+
 
