@@ -173,3 +173,194 @@ static void InvalidateControls() {
 static void InvalidateStage() {
 	if (g_hwndMain && !g_hasVideo) InvalidateRect(g_hwndMain, nullptr, FALSE);
 }
+
+
+static const wchar_t* kRegKey = L"Software\\DesktopMediaPlayer";
+
+static void LoadSettings() {
+	HKEY k;
+	if (RegOpenKeyExW(HKEY_CURRENT_USER, kRegKey, 0, KEY_READ, &k) != ERROR_SUCCESS) return;
+	DWORD v = 0, sz = sizeof(v), type = 0;
+	if (RegQueryValueExW(k, L"Volume", nullptr, &type, (LPBYTE)&v, &sz) == ERROR_SUCCESS && type == REG_DWORD)
+		g_volume = Clamp01(v / 100.0f);
+	for (int i = 0; i < kMaxRecent; i++) {
+		wchar_t name[16], buf[1024];
+		swprintf_s(name, L"Recent%d", i);
+		DWORD bsz = sizeof(buf);
+		if (RegQueryValueExW(k, name, nullptr, &type, (LPBYTE)buf, &bsz) == ERROR_SUCCESS && type == REG_SZ && buf[0])
+			g_recent.push_back(buf);
+	}
+	RegCloseKey(k);
+}
+
+static void SaveSettings() {
+	HKEY k;
+	if (RegCreateKeyExW(HKEY_CURRENT_USER, kRegKey, 0, nullptr, 0, KEY_WRITE, nullptr, &k, nullptr) != ERROR_SUCCESS) return;
+	DWORD v = (DWORD)(g_volume * 100.0f + 0.5f);
+	RegSetValueExW(k, L"Volume", 0, REG_DWORD, (const BYTE*)&v, sizeof(v));
+	for (int i = 0; i < kMaxRecent; i++) {
+		wchar_t name[16];
+		swprintf_s(name, L"Recent%d", i);
+		if (i < (int)g_recent.size())
+			RegSetValueExW(k, name, 0, REG_SZ, (const BYTE*)g_recent[i].c_str(), (DWORD)((g_recent[i].size() + 1) * sizeof(wchar_t)));
+		else
+			RegDeleteValueW(k, name);
+	}
+	RegCloseKey(k);
+}
+
+static void AddRecent(const std::wstring& path) {
+	g_recent.erase(std::remove(g_recent.begin(), g_recent.end(), path), g_recent.end());
+	g_recent.insert(g_recent.begin(), path);
+	if ((int)g_recent.size() > kMaxRecent) g_recent.resize(kMaxRecent);
+	SaveSettings();
+}
+
+
+class SessionCallback final : public IMFAsyncCallback {
+public:
+	SessionCallback(HWND hwnd, IMFMediaSession* s, DWORD gen) : m_hwnd(hwnd), m_session(s), m_gen(gen), m_cRef(1) {
+		m_session->AddRef();
+		InitializeCriticalSection(&m_cs);
+		m_closed = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+	}
+	~SessionCallback() {
+		CloseHandle(m_closed);
+		DeleteCriticalSection(&m_cs);
+	}
+	HANDLE ClosedEvent() const { return m_closed; }
+	void Detach() {
+		EnterCriticalSection(&m_cs);
+		SafeRelease(&m_session);
+		LeaveCriticalSection(&m_cs);
+	}
+
+	STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
+		if (riid == IID_IUnknown || riid == __uuidof(IMFAsyncCallback)) {
+			*ppv = static_cast<IMFAsyncCallback*>(this);
+			AddRef();
+			return S_OK;
+		}
+		*ppv = nullptr;
+		return E_NOINTERFACE;
+	}
+
+	STDMETHODIMP_(ULONG) AddRef() override {
+		return InterlockedIncrement(&m_cRef);
+	}
+
+	STDMETHODIMP_(ULONG) Release() override {
+		ULONG n = InterlockedDecrement(&m_cRef);
+		if (n == 0) delete this;
+		return n;
+	}
+
+	STDMETHODIMP GetParameters(DWORD*, DWORD*) override {
+		return E_NOTIMPL;
+	}
+
+	STDMETHODIMP Invoke(IMFAsyncResult* pResult) override {
+		IMFMediaSession* s = nullptr;
+		EnterCriticalSection(&m_cs);
+		if (m_session) { 
+			s = m_session; 
+			s->AddRef(); 
+		}
+		LeaveCriticalSection(&m_cs);
+		if (!s) return S_OK;
+
+		IMFMediaEvent* ev = nullptr;
+		if (SUCCEEDED(s->EndGetEvent(pResult, &ev))) {
+			MediaEventType t = MEUnknown;
+			ev->AddRef();
+
+			if (t == MESessionClosed) SetEvent(m_closed);
+			if (!PostMessage(m_hwnd, WM_APP_SESSION_EVENT, (WPARAM)m_gen, (LPARAM)ev))
+				ev->Release();
+			if (t != MESessionClosed) s->BeginGetEvent(this, nullptr);
+		}
+		s->Release();
+		return S_OK;
+	}
+private:
+	HWND m_hwnd;
+	IMFMediaSession* m_session;
+	DWORD m_gen;
+	LONG m_cRef;
+	CRITICAL_SECTION m_cs;
+	HANDLE m_closed;
+};
+
+static SessionCallback* g_pCallback = nullptr;
+
+
+static HRESULT AddBranch(IMFTopology* topo, IMFPresentationDescriptor* pd, IMFStreamDescriptor* sd, HWND videoHwnd, bool* isVideo) {
+	
+	Com<IMFMediaTypeHandler> handler;
+	HRESULT hr = sd->GetMediaTypeHandler(handler.put());
+	if (FAILED(hr)) return hr;
+
+	GUID major = {};
+	hr = handler->GetMajorType(&major);
+	if (FAILED(hr)) return hr;
+
+	Com<IMFActivate> activate;
+	if (major == MFMediaType_Audio)
+		hr = MFCreateAudioRendererActivate(activate.put());
+	else if (major == MFMediaType_Video) {
+		hr = MFCreateVideoRendererActivate(videoHwnd, activate.put());
+		if (isVideo) *isVideo = true;
+	}
+	else
+		return MF_E_INVALIDMEDIATYPE;
+
+	if (FAILED(hr)) return hr;
+
+	Com<IMFTopologyNode> src, sink;
+	hr = MFCreateTopologyNode(MF_TOPOLOGY_SOURCESTREAM_NODE, src.put());
+	if (FAILED(hr)) return hr;
+
+	src->SetUnknown(MF_TOPONODE_SOURCE, g_pSource);
+	src->SetUnknown(MF_TOPONODE_PRESENTATION_DESCRIPTOR, pd);
+	src->SetUnknown(MF_TOPONODE_STREAM_DESCRIPTOR, sd);
+
+	hr = MFCreateTopologyNode(MF_TOPOLOGY_OUTPUT_NODE, sink.put());
+	if (FAILED(hr)) return hr;
+
+	sink->SetObject(activate.get());
+
+	topo->AddNode(src.get());
+	topo->AddNode(sink.get());
+	return src->ConnectOutput(0, sink.get(), 0);
+}
+
+static HRESULT CreateTopology(IMFTopology** ppTopo, bool** hasVideo) {
+	Com<IMFTopology> topo;
+	HRESULT hr = MFCreateTopology(topo.put());
+	if (FAILED(hr)) return hr;
+
+	Com<IMFPresentationDescriptor> pd;
+	hr = g_pSource->CreatePresentationDescriptor(pd.put());
+	if (FAILED(hr)) return hr;
+	DWORD count = 0;
+	pd->GetStreamDescriptorCount(&count);
+	int connected = 0;
+	*hasVideo = false;
+	for (DWORD i = 0; i < count; i++) {
+		BOOL selected = FALSE;
+		Com<IMFStreamDescriptor> sd;
+		if (SUCCEEDED(pd->GetStreamDescriptorByIndex(i, &selected, sd.put())) && selected) {
+			bool isVideo = false;
+			if (SUCCEEDED(AddBranch(topo.get(), pd.get(), sd.get(), g_hwndVideo, &isVideo))) {
+				connected++;
+				if (isVideo) *hasVideo = true;
+			}
+		}
+	}
+	if (connected == 0) return MF_E_TOPO_CODEC_NOT_FOUND;
+
+	*ppTopo = topo.get();
+	(*ppTopo)->AddRef();
+	return S_OK;
+}
+
