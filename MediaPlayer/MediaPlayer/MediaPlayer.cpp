@@ -434,5 +434,330 @@ static void ToggleFullscreen() {
 }
 
 
+//Playback control
+static void StartTimers() {
+	SetTimer(g_hwndMain, TIMER_PROGRESS, 100, nullptr);
+	if (!g_hasVideo) SetTimer(g_hwndMain, TIMER_ANIM, 40, nullptr);
+}
+
+static void KillTimers() {
+	KillTimer(g_hwndMain, TIMER_PROGRESS);
+	KillTimer(g_hwndMain, TIMER_ANIM);
+}
+
+static void ApplyVolume() {
+	if (g_pVolume) {
+		g_pVolume->SetMasterVolume(g_volume);
+		g_pVolume->SetMute(g_muted ? TRUE : FALSE);
+	}
+}
+
+static void SetVolume(float v) {
+	g_volume = Clamp01(v);
+	if (g_volume > 0.0f) g_muted = false;
+	ApplyVolume();
+	InvalidateControls();
+}
+
+static void ToggleMute() { 
+	g_muted = !g_muted;
+	ApplyVolume();
+	InvalidateControls();
+}
+
+static void ApplyRate() {
+	if (g_pRate) g_pRate->SetRate(FALSE, kRates[g_rateIdx]);
+}
+
+static void SetRateIndex(int i) {
+	g_rateIdx = max(0, min(kRateCount - 1, i));
+	ApplyRate();
+	InvalidateControls();
+}
+
+static void SessionStart(const MFTIME* pos) {
+	PROPVARIANT v;
+	PropVariantInit(&v);
+	if (pos) {
+		v.vt = VT_I8;
+		v.hVal.QuadPart = *pos;
+	}
+	g_pSession->Start(&GUID_NULL, &v);
+	PropVariantClear(&v);
+}
+
+static void UpdateTitle() {
+	std::wstring t = g_title.empty() ? L"Media Player" : g_title + L" - Media Player";
+	if (g_playlist.size() > 1) {
+		wchar_t n[32];
+		swprintf_s(n, L"  (%d/%d)", g_index + 1, (int)g_playlist.size());
+		t += n;
+	}
+	SetWindowTextW(g_hwndMain, t.c_str());
+}
+
+static void CloseSession() {
+	KillTimers();
+	g_gen++;
+
+	SafeRelease(&g_pVideoControl);
+	SafeRelease(&g_pVolume);
+	SafeRelease(&g_pRate);
+
+	if (g_pSession) {
+		g_pSession->Close();
+		if (g_pCallback) WaitForSingleObject(g_pCallback->ClosedEvent(), 2000);
+	}
+
+	if (g_pSource) {
+		g_pSource->Shutdown();
+		SafeRelease(&g_pSource);
+	}
+
+	if (g_pSession) {
+		g_pSession->Shutdown();
+		SafeRelease(&g_pSession);
+	}
+
+	if (g_pCallback) {
+		g_pCallback->Detach();
+		SafeRelease(&g_pCallback);
+	}
+
+	g_state = PlayerState::CLOSED;
+	g_duration = 0;
+	g_currentPos = 0;
+	g_hasVideo = false;
+	g_pauseAfterStart = false;
+	Layout();
+	InvalidateControls();
+}
+
+static HRESULT OpenURL(const std::wstring& url) {
+	CloseSession();
+	g_error.clear();
+	g_title = FileNameOf(url);
+
+	HRESULT hr = MFCreateMediaSession(nullptr, &g_pSession);
+
+	if (SUCCEEDED(hr)) {
+		g_gen++;
+		g_pCallback = new SessionCallback(g_hwndMain, g_pSession, g_gen);
+		hr = g_pSession->BeginGetEvent(g_pCallback, nullptr);
+	}
+	if (SUCCEEDED(hr)) {
+		Com<IMFSourceResolver> resolver;
+		Com<IUnknown> unk;
+		MF_OBJECT_TYPE type = MF_OBJECT_INVALID;
+
+		hr = MFCreateSourceResolver(resolver.put());
+		if (SUCCEEDED(hr)) {
+			hr = resolver->CreateObjectFromURL(url.c_str(), MF_RESOLUTION_MEDIASOURCE | MF_RESOLUTION_CONTENT_DOES_NOT_HAVE_TO_MATCH_EXTENSION_OR_MIME_TYPE, nullptr, &type, unk.put());
+		}
+		if (SUCCEEDED(hr)) hr = unk->QueryInterface(IID_PPV_ARGS(&g_pSource));
+	}
+	if (SUCCEEDED(hr)) {
+		Com<IMFTopology> topo;
+		bool hasVideo = false;
+		hr = CreateTopology(topo.put(), &hasVideo);
+
+		if (SUCCEEDED(hr)) {
+			g_hasVideo = hasVideo;
+			hr = g_pSession->SetTopology(0, topo.get());
+		}
+	}
+	if (SUCCEEDED(hr)) {
+		g_state = PlayerState::OPEN_PENDING;
+		Layout();
+	}
+	else {
+		std::wstring name = g_title;
+		CloseSession();
+		g_title = name;
+		g_error = L"This file couldn't be opened. The format or codec may bot be supported.";
+	}
+	UpdateTitle();
+	InvalidateControls();
+	InvalidateRect(g_hwndMain, nullptr, FALSE);
+	return hr;
+}
+
+static void PlayIndex(int i) {
+	if (i < 0 || i >= (int)g_playlist.size()) return;
+	g_index = i;
+	AddRecent(g_playlist[i]);
+	OpenURL(g_playlist[i]);
+}
+
+static void SetPlaylist(const std::vector<std::wstring>& files) {
+	if (files.empty()) return;
+	g_playlist = files;
+	PlayIndex(0);
+}
+
+static void Stop() {
+	if (!CanControl() || g_state == PlayerState::STOPPED) return;
+	g_pauseAfterStart = false;
+	g_pSession->Stop();
+	g_state = PlayerState::STOPPED;
+	g_currentPos = 0;
+	KillTimers();
+	InvalidateControls();
+	InvalidateStage();
+}
+
+static void Play() {
+	if (!CanControl()) {
+		if (g_state == PlayerState::CLOSED && g_index >= 0) PlayIndex(g_index);
+		return;
+	}
+	if (g_state == PlayerState::STOPPED) return;
+	g_pauseAfterStart = false;
+	MFTIME zero = 0;
+	if (g_state == PlayerState::STOPPED) SessionStart(&zero);
+	else SessionStart(nullptr);
+	g_state = PlayerState::STARTED;
+	StartTimers();
+	InvalidateControls();
+}
+
+static void Pause() {
+	if (!CanControl() || g_state != PlayerState::STARTED) return;
+	g_pSession->Pause();
+	g_state = PlayerState::PAUSED;
+	KillTimer(g_hwndMain, TIMER_PROGRESS);
+	InvalidateControls();
+	InvalidateStage();
+}
+
+static void TogglePlay() {
+	if (g_state == PlayerState::STARTED) Pause();
+	else Play();
+}
+
+static void SeekTo(MFTIME pos) {
+	if (!CanControl() || g_duration <= 0) return;
+	if (pos < 0) pos = 0;
+	if (pos > g_duration) pos = g_duration;
+	g_currentPos = pos;
+	if (g_state == PlayerState::PAUSED) g_pauseAfterStart = true;
+	SessionStart(&pos);
+	if (g_state == PlayerState::STOPPED) {
+		g_state = PlayerState::STARTED;
+		StartTimers();
+	}
+	InvalidateControls();
+}
+
+static void SkipBy(double seconds) {
+	SeekTo(g_currentPos + (MFTIME)(seconds * 10000000.0));
+}
+
+static void NextTrack() {
+	if (g_index + 1 < (int)g_playlist.size()) PlayIndex(g_index + 1);
+}
+
+static void PrevTrack() {
+	if (g_currentPos > 30000000LL || g_index <= 0) {
+		SeekTo(0);
+		return;
+	}
+	PlayIndex(g_index - 1);
+}
+
+static void UpdateProgress() {
+	if (!CanControl() || g_duration <= 0 || g_state != PlayerState::STARTED || g_dragSeek) return;
+	Com<IMFClock> clock;
+	if (FAILED(g_pSession->GetClock(clock.put()))) return;
+	Com<IMFPresentationClock> pc;
+	if (FAILED(clock->QueryInterface(IID_PPV_ARGS(pc.put())))) return;
+	MFTIME pos = 0;
+	if (SUCCEEDED(pc->GetTime(&pos))) {
+		if (pos > g_duration) pos = g_duration;
+		g_currentPos = pos;
+		InvalidateControls();
+	}
+}
+
+static void HandleSessionEvent(IMFMediaEvent* ev) {
+	MediaEventType type = MEUnknown;
+	ev->GetType(&type);
+
+	switch (type) {
+	case MESessionTopologyStatus: {
+		UINT32 status = 0;
+		ev->GetUINT32(MF_EVENT_TOPOLOGY_STATUS, &status);
+
+		if (status != MF_TOPOSTATUS_READY) break; 
+		
+		Com<IMFGetService> gs;
+		if (SUCCEEDED(g_pSession->QueryInterface(IID_PPV_ARGS(gs.put())))) {
+			gs->GetService(MR_VIDEO_RENDER_SERVICE, IID_PPV_ARGS(&g_pVideoControl));
+			gs->GetService(MR_POLICY_VOLUME_SERVICE, IID_PPV_ARGS(&g_pVolume));
+			gs->GetService(MF_RATE_CONTROL_SERVICE, IID_PPV_ARGS(&g_pRate));
+		}
+
+		if (g_pVideoControl) {
+			g_pVideoControl->SetBorderColor(RGB(0, 0, 0));
+			RECT vr;
+			GetClientRect(g_hwndVideo, &vr);
+			g_pVideoControl->SetVideoPosition(nullptr, &vr);
+		}
+		Com<IMFPresentationDescriptor> pd;
+		if (SUCCEEDED(g_pSource->CreatePresentationDescriptor(pd.put()))) {
+			UINT64 d = 0;
+			if (SUCCEEDED(pd->GetUINT64(MF_PD_DURATION, &d))) g_duration = (MFTIME)d;
+		}
+		ApplyVolume();
+		ApplyRate();
+		g_currentPos = 0;
+		SessionStart(nullptr);
+		g_state = PlayerState::STARTED;
+		StartTimers();
+		InvalidateControls();
+		InvalidateRect(g_hwndMain, nullptr, FALSE);
+		break;
+	}
+
+	case MESessionStarted:
+		if (g_pauseAfterStart) {
+			g_pauseAfterStart = false;
+			g_pSession->Pause();
+		}
+		break;
+
+	case MESessionEnded: {
+		KillTimers();
+		if (g_index + 1 < (int)g_playlist.size()) {
+			PlayIndex(g_index + 1);
+		}
+		else {
+			g_state = PlayerState::STOPPED;
+			g_currentPos = 0;
+			InvalidateControls();
+			InvalidateStage();
+		}
+		break;
+	}
+
+	case MEError: {
+		HRESULT hrStatus = S_OK;
+		ev->GetStatus(&hrStatus);
+		std::wstring name = g_title;
+		CloseSession();
+		g_title = name;
+		wchar_t msg[160];
+		swprintf_s(msg, L"Playback error: 0x%08X", (unsigned)hrStatus);
+		g_error = msg;
+		InvalidateRect(g_hwndMain, nullptr, FALSE);
+		break;
+	}
+	default:
+		break;
+	}
+}
 
 
+
+
+  
