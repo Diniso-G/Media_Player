@@ -758,6 +758,195 @@ static void HandleSessionEvent(IMFMediaEvent* ev) {
 }
 
 
+//Open file dialog(allow for multi select)
+static std::vector<std::wstring> OpenMediaFiles(HWND owner) {
+	std::vector<std::wstring> result;
+	std::vector<wchar_t> buf(32768, 0);
+	OPENFILENAME ofn = {};
+
+	ofn.lStructSize = sizeof(ofn);
+	ofn.hwndOwner = owner;
+	ofn.lpstrFile = buf.data();
+	ofn.nMaxFile = (DWORD)buf.size();
+	ofn.lpstrFilter = 
+		L"Media Files\0*.mp4;*.m4v;*.mov;*.mkv;*.avi;*.wmv;*.mp3;*.m4a;*.aac;*.wav;*.wma;*.flac\0" 
+		L"Video Files\0*.mp4;*.m4v;*.mov;*.mkv;*.avi;*.wmv\0"
+		L"Audio Files\0*.mp3;*.m4a;*.aac;*.wav;*.wma;*.flac\0"
+		L"All Files\0*.*\0";
+	ofn.Flags = OFN_EXPLORER | OFN_ALLOWMULTISELECT | OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+
+	if (!g_lastFolder.empty())
+		ofn.lpstrInitialDir = g_lastFolder.c_str();
+
+	if (!GetOpenFileName(&ofn))
+		return result;
+
+	std::wstring first(buf.data());
+	const wchar_t* p = buf.data() + first.size() + 1;
+	if (*p == 0) {
+		result.push_back(first);
+		size_t slash = first.find_last_of(L"\\/");
+		if (slash != std::wstring::npos)
+			g_lastFolder = first.substr(0, slash);
+	}
+	else {
+		g_lastFolder = first;
+		while (*p) {
+			std::wstring name(p);
+			result.push_back(first + L"\\" + name);
+			p += name.size() + 1;
+		}
+	}
+	return result;
+}
 
 
+//GDI nad drawing helpers and icons
+static const FontFamily* UIFamily() {
+	static FontFamily* fam = nullptr;
+	if (!fam) {
+		fam = new FontFamily(L"Segoe UI");
+		if (!fam->IsAvailable()) {
+			delete fam;
+			fam = FontFamily::GenericSansSerif()->Clone();
+		}
+	}
+	return fam;
+}
   
+static void RoundPath(GraphicsPath& p, const RectF& r, float rad) {
+	rad = min(rad, min(r.Width, r.Height) / 2.0f);
+	if (rad <= 0.5f) {
+		p.AddRectangle(r);
+		return;
+	}
+	float d = rad * 2;
+	p.AddArc(r.X, r.Y, d, d, 180, 90);
+	p.AddArc(r.GetRight() - d, r.Y, d, d, 270, 90);
+	p.AddArc(r.GetRight() - d, r.GetBottom()- d, d, d, 0, 90);
+	p.AddArc(r.X, r.GetBottom() - d, d, d, 90, 90);
+	p.CloseFigure();
+}
+
+static void FillRound(Graphics& g, const Brush& b, const RectF& r, float rad) {
+	GraphicsPath p;
+	RoundPath(p, r, rad);
+	g.FillPath(&b, &p);
+}
+
+static void DrawLabel(Graphics& g, const std::wstring& s, float px, FontStyle style, const RectF& r, const Color& col, StringAlignment h = StringAlignmentNear, StringAlignment v = StringAlignmentCenter) {
+	Font font(UIFamily(), px, style, UnitPixel);
+	StringFormat fmt;
+	fmt.SetAlignment(h);
+	fmt.SetLineAlignment(v);
+	fmt.SetTrimming(StringTrimmingEllipsisCharacter);
+	fmt.SetFormatFlags(StringFormatFlagsNoWrap);
+	SolidBrush br(col);
+	g.DrawString(s.c_str(), -1, &font, r, &fmt, &br);
+}
+
+static void DrawGlyph(Graphics& g, int id, const RectF& r, Color col) {
+	float cx = r.X + r.Width / 2, cy = r.Y + r.Height / 2;
+	float s = min(r.Width, r.Height) * 0.5f * 0.5f;
+	SolidBrush fill(col);
+
+	Pen pen(col, max(1.5f, SF(1.8f)));
+	pen.SetLineJoin(LineJoinRound);
+	pen.SetStartCap(LineCapRound);
+	pen.SetEndCap(LineCapRound);
+
+	switch (id) {
+	case B_PLAY: {
+		if (g_state == PlayerState::STARTED) {
+			FillRound(g, fill, RectF(cx - 0.95f * s, cy - s, 0.7f * s, 2 * s), s * 0.2f);
+			FillRound(g, fill, RectF(cx - 0.25f * s, cy - s, 0.7f * s, 2 * s), s * 0.2f);
+		}
+		else {
+			PointF pts[3] = {
+				PointF(cx - 0.6f * s + 0.15f * s, cy - 1.05f * s),
+				PointF(cx - 0.6f * s + 0.15f * s, cy + 1.05f * s),
+				PointF(cx + 1.0f * s + 0.15f * s, cy)
+			};
+			g.FillPolygon(&fill, pts, 3);
+		}
+		break;
+	}
+	case B_STOP: {
+		FillRound(g, fill, RectF(cx - 0.85f * s, cy - 0.85f * s, 1.7f * s, 1.7f * s), s * 0.25f);
+		break;
+	}
+	case B_PREV: {
+		FillRound(g, fill, RectF(cx - 0.1f * s, cy - 0.9F * s, 0.3f * s, 1.8F * s), s * 0.1f);
+		PointF pts[3] = {
+				PointF(cx + 1.0f * s, cy - 0.9f * s),
+				PointF(cx + 1.0f * s, cy + 0.9f * s),
+				PointF(cx - 0.55f * s, cy)
+		};
+		g.FillPolygon(&fill, pts, 3);
+		break;
+	}
+	case B_NEXT: {
+		FillRound(g, fill, RectF(cx + 0.7f * s, cy - 0.9F * s, 0.3f * s, 1.8F * s), s * 0.1f);
+		PointF pts[3] = {
+				PointF(cx - 1.0f * s, cy - 0.9f * s),
+				PointF(cx - 1.0f * s, cy + 0.9f * s),
+				PointF(cx + 0.55f * s, cy)
+		};
+		g.FillPolygon(&fill, pts, 3);
+		break;
+	}
+	case B_OPEN: {
+		PointF pts[6] = {
+				PointF(cx - 1.1f * s, cy + 0.9f * s),
+				PointF(cx - 1.1f * s, cy - 0.5f * s),
+				PointF(cx - 0.2f * s, cy - 0.9f * s),
+				PointF(cx + 0.1f * s, cy - 0.5f * s),
+				PointF(cx + 1.1f * s, cy - 0.5f * s),
+				PointF(cx + 1.1f * s, cy + 0.9f * s)
+		};
+		g.DrawPolygon(&pen, pts, 6);
+		break;
+	}
+	case B_MUTE: {
+		float ox = cx = 0.5f * s;
+		FillRound(g, fill, RectF(ox - 0.1f * s, cy - 0.5f * s, 0.6f * s, 1.0f * s), s * 0.1f);
+		PointF cone[4] = {
+				PointF(ox - 0.45f * s, cy - 0.5f * s),
+				PointF(ox + 0.4f * s, cy - 1.1f * s),
+				PointF(ox + 0.4f * s, cy + 1.1f * s),
+				PointF(ox - 0.45f * s, cy + 0.5f * s)
+		};
+		g.FillPolygon(&fill, cone, 4);
+		if (g_muted || g_volume <= 0.0f) {
+			g.DrawLine(&pen, ox + 0.8f * s, cy - 0.5f * s, ox + 1.7f * s, cy + 0.5f * s);
+			g.DrawLine(&pen, ox + 0.8f * s, cy + 0.5f * s, ox + 1.7f * s, cy - 0.5f * s);
+		}
+		else {
+			float r1 = 0.7f * s, r2 = 1.3f * s;
+			g.DrawArc(&pen, ox + 0.4f * s - r1 + 0.2f * s, cy - r1, 2 * r1, 2 * r1, -50, 100);
+			if (g_volume > 0.45f)
+				g.DrawArc(&pen, ox + 0.4f * s - r2 + 0.2f * s, cy - r2, 2 * r2, 2 * r2, -50, 100);
+		}
+		break;
+	}
+	case B_FS: {
+		float a = 1.0f * s, b = 0.45f * s;
+		const float sx[4] = { -1, 1, 1, -1 }, sy[4] = { -1, -1, 1, 1 };
+		for (int i = 0; i < 4; i++) {
+			PointF pts[3];
+			if (!g_fullscreen) {
+				pts[0] = PointF(cx + sx[i] * b, cy + sy[i] * a);
+				pts[1] = PointF(cx + sx[i] * a, cy + sy[i] * a);
+				pts[2] = PointF(cx + sx[i] * a, cy + sy[i] * b);
+			}
+			else {
+				pts[0] = PointF(cx + sx[i] * a, cy + sy[i] * b);
+				pts[1] = PointF(cx + sx[i] * b, cy + sy[i] * b);
+				pts[2] = PointF(cx + sx[i] * b, cy + sy[i] * a);
+			}
+			g.DrawLines(&pen, pts, 3);
+		}
+		break;
+	}
+	}
+}
