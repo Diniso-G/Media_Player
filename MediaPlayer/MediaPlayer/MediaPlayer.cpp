@@ -1262,4 +1262,130 @@ static LRESULT CALLBACK VideoProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
 	return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
+static HBITMAP g_bgCache = nullptr;
+static int g_bgW = 0, g_bgH = 0;
+
+static void RebuildStageBackground(HDC ref, int w, int h) {
+	if (g_bgCache) DeleteObject(g_bgCache);
+	g_bgCache = CreateCompatibleBitmap(ref, w, h);
+	g_bgW = w;
+	g_bgH = h;
+	HDC mdc = CreateCompatibleDC(ref);
+	HGDIOBJ old = SelectObject(mdc, g_bgCache);
+	{
+		Graphics g(mdc);
+		g.SetSmoothingMode(SmoothingModeAntiAlias);
+		LinearGradientBrush bg(RectF(0, 0, (float)w, (float)h), Color(255, 22, 19, 40), Color(255, 9, 9, 17), LinearGradientModeVertical);
+		g.FillRectangle(&bg, 0, 0, w, h);
+
+		GraphicsPath gp;
+		float gr = min((float)w, (float)h) * 0.62f;
+		gp.AddEllipse((float)w / 2 - gr, (float)h * 0.42f - gr, gr * 2, gr * 2);
+		PathGradientBrush pg(&gp);
+		pg.SetCenterColor(Color(90, 120, 96, 255));
+		Color edge(0, 120, 96, 255);
+		g.FillPath(&pg, &gp);
+	}
+	SelectObject(mdc, old);
+	DeleteDC(mdc);
+}
+
+static void PaintStage(HWND hwnd) {
+	PAINTSTRUCT ps;
+	HDC hdc = BeginPaint(hwnd, &ps);
+	int w = g_stageRect.right, h = g_stageRect.bottom;
+	if (w <= 0 || h <= 0 || g_hasVideo) {
+		EndPaint(hwnd, &ps);
+		return;
+	}
+
+	if (!g_bgCache || g_bgW != w || g_bgH != h) RebuildStageBackground(hdc, w, h);
+
+	HDC mdc = CreateCompatibleDC(hdc);
+	HBITMAP bmp = CreateCompatibleBitmap(hdc, w, h);
+	HGDIOBJ old = SelectObject(mdc, bmp);
+	{
+		HDC cdc = CreateCompatibleDC(hdc);
+		HGDIOBJ co = SelectObject(cdc, g_bgCache);
+		BitBlt(mdc, 0, 0, w, h, cdc, 0, 0, SRCCOPY);
+		SelectObject(cdc, co);
+		DeleteObject(cdc);
+
+		Graphics g(mdc);
+		g.SetSmoothingMode(SmoothingModeAntiAlias);
+		g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
+
+		float cx = w / 2.0f, cy = h * 0.40f;
+		float R = max(SF(38), min(min((float)w, (float)h) * 0.13f, SF(82)));
+		bool playing = g_state == PlayerState::STARTED;
+		bool hasMedia = g_state != PlayerState::CLOSED;
+
+		SolidBrush ring(Color(26, 255, 255, 255));
+		g.FillEllipse(&ring, cx - R * 1.28f, cy - R * 1.28f, R * 2.56f, R * 2.56f);
+		LinearGradientBrush disc(RectF(cx - R, cy - R, R * 2, R * 2), ColAccentA(), ColAccentB(), 45.0f);
+		g.FillEllipse(&disc, cx - R, cy - R, R * 2, R * 2);
+
+		SolidBrush white(Color(255, 255, 255, 255));
+		Pen wp(Color(255, 255, 255, 255), max(2.0f, R * 0.09f));
+		wp.SetLineJoin(LineJoinRound);
+
+		if (hasMedia || !g_error.empty()) {
+			float u = R * 0.42f;
+			g.FillEllipse(&white, cx - u * 1.15f, cy + u * 0.55f, u * 0.9f, u * 0.7f);
+			g.FillEllipse(&white, cx + u * 0.35f, cy + u * 0.25f, u * 0.9f, u * 0.7f);
+			g.DrawLine(&wp, cx - u * 0.3f, cy + u * 0.85f, cx - u * 0.3f, cy - u * 1.05f);
+			g.DrawLine(&wp, cx + u * 1.2f, cy + u * 0.6f, cx + u * 1.2f, cy - u * 1.35f);
+
+			PointF beam[4] = { PointF(cx - u * 0.3f, cy - u * 1.05f), PointF(cx + u * 1.2f, cy - u * 1.35f),
+								PointF(cx + u * 1.2f, cy - u * 0.8f), PointF(cx - u * 0.3f, cy - u * 0.5f) };
+			g.FillPolygon(&white, beam, 4);
+		}
+		else {
+			float u = R * 0.42f;
+			PointF tri[3] = { PointF(cx - u * 0.55f + u * 0.2f, cy - u * 0.95f), PointF(cx - u * 0.55f + u * 0.2f, cy + u * 0.95f),
+								PointF(cx + u * 0.95f + u * 0.2f, cy) };
+			g.FillPolygon(&white, tri, 3);
+		}
+
+		float eqTop = cy + R * 1.55f;
+		const int bars = 28;
+		float eqW = min((float)w * 0.55f, SF(560));
+		float bw = eqW / bars, maxH = min(SF(70), h * 0.12f);
+		double t = GetTickCount64() / 1000.0;
+		for (int i = 0; i < bars; i++) {
+			float lvl = 0.07f;
+			if (playing && !g_hasVideo)
+				lvl = 0.12f + 0.88f * (float)fabs(sin(t * 2.1 + i * 0.52) * sin(t * 1.13 + i * 0.23));
+			float bh = maxH * lvl;
+			RectF br(cx - eqW / 2 + i * bw + bw * 0.2f, eqTop + (maxH - bh), bw * 0.6f, bh);
+			float mix = (float)i / (bars - 1);
+			SolidBrush bb(Color(playing ? 210 : 90, (BYTE)(139 + 97 * mix), (BYTE)(124 - 14 * mix), (BYTE)(255 - 65 * mix)));
+			FillRound(g, bb, br, br.Width / 2);
+		}
+
+		float ty = eqTop + maxH + SF(22);
+		float tw = min((float)w - SF(48), SF(760));
+		if (hasMedia || !g_title.empty()) {
+			DrawLabel(g, g_title, SF(24), FontStyleBold, RectF(cx - tw / 2, ty, tw, SF(34)), ColText(), StringAlignmentCenter);
+			std::wstring sub;
+			if (!g_error.empty()) sub = g_error;
+			else if (g_playlist.size() > 1) {
+				wchar_t b[64];
+				swprintf_s(b, L"Track %d of $d", g_index + 1, (int)g_playlist.size());
+				sub = b;
+			}
+			else sub = playing ? L"Now playing" : (g_state == PlayerState::PAUSED ? L"Paused" : L"");
+			DrawLabel(g, sub, SF(14), FontStyleRegular, RectF(cx - tw / 2, ty + SF(36), tw, SF(24)), g_error.empty() ? ColTextDim() : Color(255, 255, 128, 128), StringAlignmentCenter);
+		}
+		else {
+			DrawLabel(g, L"Drop a media file here", SF(24), FontStyleBold, RectF(cx - tw / 2, ty, tw, SF(34)), ColText(), StringAlignmentCenter);
+			DrawLabel(g, L"or press Ctrl + O to browse", SF(14), FontStyleRegular, RectF(cx - tw / 2, ty + SF(36), tw, SF(24)), ColTextDim(), StringAlignmentCenter);
+		}
+	}
+	BitBlt(hdc, 0, 0, w, h, mdc, 0, 0, SRCCOPY);
+	SelectObject(mdc, old);
+	DeleteObject(bmp);
+	DeleteDC(mdc);
+	EndPaint(hwnd, &ps);
+}
 
