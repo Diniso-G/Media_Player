@@ -1012,15 +1012,181 @@ static int HitTest(float x, float y) {
 	return HOT_NONE;
 }
 
+static void PaintControls(HWND hwnd) {
+	PAINTSTRUCT ps;
+	HDC hdc = BeginPaint(hwnd, &ps);
+	RECT rc;
+	GetClientRect(hwnd, &rc);
+	int w = rc.right, h = rc.bottom;
+	if (w <= 0 || h <= 0) {
+		EndPaint(hwnd, &ps);
+		return;
+	}
 
+	HDC mdc = CreateCompatibleDC(hdc);
+	HBITMAP bmp = CreateCompatibleBitmap(hdc, w, h);
+	HGDIOBJ old = SelectObject(mdc, bmp);
+	{
+		Graphics g(mdc);
+		g.SetSmoothingMode(SmoothingModeAntiAlias);
+		g.SetPixelOffsetMode(PixelOffsetModeHalf);
+		g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
+		ComputeLayout((float)w);
 
+		LinearGradientBrush bg(RectF(0, 0, (float)w, (float)h), Color(255, 28, 26, 24), Color(255, 17, 16, 27), LinearGradientModeVertical);
 
+		g.FillRectangle(&bg, 0, 0, w, h);
+		Pen edge(Color(36, 255, 255, 255), 1.0f);
+		g.DrawLine(&edge, 0.0f, 0.5f, (float)w, 0.5f);
 
+		bool seekHot = (g_hot == HOT_SEEK) || g_dragSeek;
+		bool canSeek = CanControl() && g_duration > 0;
+		float frac = g_dragSeek ? g_seekFrac : (g_duration > 0 ? Clamp01((float)((double)g_duration)) : 0.0f);
+		MFTIME shown = g_dragSeek ? (MFTIME)(frac * (double)g_duration) : g_currentPos;
 
+		DrawLabel(g, FormatTime(shown), SF(12.5f), FontStyleRegular, g_timeL, ColText(), StringAlignmentNear);
+		DrawLabel(g, FormatTime(g_duration), SF(12.5f), FontStyleRegular, g_timeR, ColTextDim(), StringAlignmentFar);
 
+		float th = seekHot && canSeek ? SF(7) : SF(5);
+		RectF track(g_seekTrack.X, g_seekTrack.Y + g_seekTrack.Height / 2 - th / 2, g_seekTrack.Width, th);
+		SolidBrush trackBr(Color(54, 255, 255, 255));
+		FillRound(g, trackBr, track, th / 2);
 
+		if (frac > 0.0f && track.Width > 1) {
+			RectF fillR(track.X, track.Y, max(th, track.Width * frac), th);
+			LinearGradientBrush lg(PointF(track.X, 0), PointF(track.GetRight() + 1, 0), ColAccentA(), ColAccentB());
+			FillRound(g, lg, fillR, th / 2);
+		}
 
+		if (canSeek && (seekHot || g_state == PlayerState::PAUSED)) {
+			float tx = track.X + track.Width * frac, ty = track.Y + th / 2;
+			SolidBrush glow(Color(seekHot ? 70 : 40, 139, 124, 255));
+			g.FillEllipse(&glow, tx - SF(12), ty - SF(12), SF(24), SF(24));
+			SolidBrush thumb(Color(255, 255, 255, 255));
+			g.FillEllipse(&thumb, tx - SF(6.5f), ty - SF(6.5f), SF(13), SF(13));
+		}
 
+		if (canSeek && seekHot) {
+			float hf = g_dragSeek ? g_seekFrac : g_hoverFrac;
+			std::wstring tip = FormatTime((MFTIME)(hf * (double)g_duration));
+			float tw = SF(58), thh = SF(22);
+			float tx = track.X + track.Width * hf - tw / 2;
+			tx = max(SF(4), min(tx, w - tw - SF(4)));
+			RectF tipR(tx, track.Y - SF(34), tw, thh);
+			SolidBrush tipBg(Color(235, 44, 42, 66));
+			FillRound(g, tipBg, tipR, SF(6));
+			DrawLabel(g, tip, SF(12), FontStyleRegular, tipR, ColText(), StringAlignmentCenter);
+		}
+
+		for (int i = 0; i < B_COUNT; i++) {
+			const RectF& r = g_btn[i];
+			if (r.Width <= 0) continue;
+			bool en = IsEnabled(i);
+			bool hot = (g_hot == i) && en;
+			bool down = (g_pressed == i) && hot;
+
+			if (i == B_PLAY) {
+				float grow = hot ? SF(2) : 0.0f;
+				RectF pr(r.X - grow, r.Y - grow, r.Width + 2 * grow, r.Height + 2 * grow);
+
+				if (en) {
+					SolidBrush halo(Color(hot ? 55 : 30, 139, 124, 255));
+					g.FillEllipse(&halo, pr.X - SF(5), pr.Y - SF(5), pr.Width + SF(10), pr.Height + SF(10));
+					LinearGradientBrush pg(pr, down ? Color(255, 118, 104, 235) : ColAccentA(), down ? Color(255, 210, 92, 168) : ColAccentB(), 45.0f);
+					g.FillEllipse(&pg, pr);
+				}
+				else {
+					SolidBrush off(Color(255, 52, 50, 70));
+					g.FillEllipse(&off, pr);
+				}
+				DrawGlyph(g, B_PLAY, pr, en ? Color(255, 255, 255, 255) : ColIconOff());
+			}
+			else if (i == B_SPEED) {
+				if (hot || down) {
+					SolidBrush hb(Color(down ? 40 : 24, 255, 255, 255));
+					FillRound(g, hb, r, r.Height / 2);
+				}
+				Pen pill(Color(g_rateIdx == 2 ? 70 : 160, 255, 255, 255), 1.2f);
+				GraphicsPath pp;
+				RoundPath(pp, r, r.Height / 2);
+				g.DrawPath(&pill, &pp);
+				wchar_t sp[16];
+				swprintf_s(sp, L"%gx", kRates[g_rateIdx]);
+				DrawLabel(g, sp, SF(12.5f), FontStyleBold, r, g_rateIdx == 2 ? ColTextDim() : ColAccentB(), StringAlignmentCenter);
+			} 
+			else {
+				if (hot || down) {
+					SolidBrush hb(Color(down ? 40 : 24, 255, 255, 255));
+					FillRound(g, hb, r, SF(10));
+				}
+				Color gc = !en ? ColIconOff() : (hot ? Color(255, 255, 255, 255) : ColIcon());
+				if (i == B_MUTE && (g_muted || g_volume <= 0.0f) && en) gc = ColAccentB();
+				DrawGlyph(g, i, r, gc);
+			}
+		}
+
+		{
+			bool vh = (g_hot == HOT_VOL) || g_dragVol;
+			float vth = vh ? SF(6) : SF(4);
+			RectF vt(g_volTrack.X, g_volTrack.Y + g_volTrack.Height / 2 - vth / 2, g_volTrack.Width, vth);
+			SolidBrush vb(Color(54, 255, 255, 255));
+			FillRound(g, vb, vt, vth / 2);
+
+			float vf = g_muted ? 0.0f : g_volume;
+			if (vf > 0.0f) {
+				RectF vfill(vt.X, vt.Y, max(vth, vt.Width * vf), vth);
+				LinearGradientBrush vg(PointF(vt.X, 0), PointF(vt.GetRight() + 1, 0), ColAccentA(), ColAccentB());
+				FillRound(g, vg, vfill, vth / 2);
+			}
+			if (vh) {
+				SolidBrush th2(Color(255, 255, 255, 255));
+				float tx = vt.X + vt.Width * vf, ty = vt.Y + vth / 2;
+				g.FillEllipse(&th2, tx - SF(5.5f), ty - SF(5.5f), SF(11), SF(11));
+			}
+			if (g_volText.Width > 0) {
+				wchar_t vtxt[16];
+				swprintf_s(vtxt, L"%d%%", g_muted ? 0 : (int)(g_volume * 100.0f + 0.5f));
+				DrawLabel(g, vtxt, SF(12.5f), FontStyleRegular, g_volText, ColTextDim(), StringAlignmentFar);
+			}
+		}
+	}
+	BitBlt(hdc, 0, 0, w, h, mdc, 0, 0, SRCCOPY);
+	SelectObject(mdc, old);
+	DeleteObject(bmp);
+	DeleteDC(mdc);
+	EndPaint(hwnd, &ps);
+}
+
+static void ExecCommand(int id);
+
+static LRESULT CALLBACK ControlProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+	switch (msg)
+	{
+	case WM_ERASEBKGND:
+		return 1;
+	case WM_PAINT:
+		PaintControls(hwnd);
+		return 0;
+
+	case WM_MOUSEMOVE:
+		float x = (float)GET_X_LPARAM(lParam), y = (float)GET_Y_LPARAM(lParam);
+		ActivityPing();
+		if (!g_trackingLeave) {
+			TRACKMOUSEEVENT t = { sizeof(t), TME_LEAVE, hwnd, 0 };
+			TrackMouseEvent(&t);
+			g_trackingLeave = true;
+		}
+		if (g_dragSeek) g_seekFrac = Clamp01((x - g_seekTrack.X) / g_seekTrack.Width);
+		if (g_dragVol) SetVolume((x - g_volTrack.X) / g_volTrack.Width);
+
+		int hot = HitTest(x, y);
+		if (hot == HOT_SEEK) g_hoverFrac = Clamp01((x - g_seekTrack.X) / g_seekTrack.Width);
+
+		g_hot = hot;
+		InvalidateRect(hwnd, nullptr, FALSE);
+		return 0;
+	}
+	
 
 
 
