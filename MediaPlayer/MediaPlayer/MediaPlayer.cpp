@@ -1164,11 +1164,12 @@ static LRESULT CALLBACK ControlProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 	{
 	case WM_ERASEBKGND:
 		return 1;
-	case WM_PAINT:
+	case WM_PAINT: {
 		PaintControls(hwnd);
 		return 0;
+	}
 
-	case WM_MOUSEMOVE:
+	case WM_MOUSEMOVE: {
 		float x = (float)GET_X_LPARAM(lParam), y = (float)GET_Y_LPARAM(lParam);
 		ActivityPing();
 		if (!g_trackingLeave) {
@@ -1186,8 +1187,79 @@ static LRESULT CALLBACK ControlProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 		InvalidateRect(hwnd, nullptr, FALSE);
 		return 0;
 	}
-	
+
+	case WM_LBUTTONDOWN:
+	case WM_LBUTTONDBLCLK: {
+		float x = (float)GET_X_LPARAM(lParam), y = (float)GET_Y_LPARAM(lParam);
+		int hit = HitTest(x, y);
+		SetCapture(hwnd);
+		if (hit == HOT_SEEK && CanControl() && g_duration > 0) {
+			g_dragSeek = true;
+			g_seekFrac = Clamp01((x - g_seekTrack.X) / g_seekTrack.Width);
+		}
+		else if (hit == HOT_VOL) {
+			g_dragVol = true;
+			SetVolume((x - g_volTrack.X) / g_volTrack.Width);
+		}
+		else if (hit >= 0 && hit < B_COUNT && IsEnabled(hit)) {
+			g_pressed = hit;
+		}
+		InvalidateRect(hwnd, nullptr, FALSE);
+		return 0;
+	}
+
+	case WM_LBUTTONUP: {
+		float x = (float)GET_X_LPARAM(lParam), y = (float)GET_Y_LPARAM(lParam);
+		if (GetCapture() == hwnd) ReleaseCapture();
+		if (g_dragSeek) {
+			g_dragSeek = false;
+			SeekTo((MFTIME)(g_seekFrac * (double)g_duration));
+		}
+		g_dragVol = false;
+		int pressed = g_pressed;
+		g_pressed = HOT_NONE;
+		if (pressed >= 0 && pressed == HitTest(x, y)) {
+			static const int map[B_COUNT] = { CMD_OPEN, CMD_STOP, CMD_PREV, CMD_PLAYPAUSE, CMD_NEXT, CMD_SPEED, CMD_MUTE, CMD_FULLSCREEN };
+			ExecCommand(map[pressed]);
+		}
+		g_hot = HitTest(x, y);
+		InvalidateRect(hwnd, nullptr, FALSE);
+		return 0;
+	}
+	case WM_RBUTTONUP: {
+		SendMessage(g_hwndMain, WM_CONTEXTMENU, (WPARAM)hwnd, MAKELPARAM(-1, -1));
+		return 0;
+	}
+	case WM_SETCURSOR: {
+		if (g_hot != HOT_NONE && LOWORD(lParam) == HTCLIENT) {
+			SetCursor(LoadCursor(nullptr, IDC_HAND));
+			return TRUE;
+		}
+		break;
+	}
+	}
+	return DefWindowProc(hwnd, msg, wParam, lParam);
+}
 
 
+//Video windo and the stage/empty screen
+static LRESULT CALLBACK VideoProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+	switch (msg)
+	{
+	case WM_NCHITTEST:
+		return HTTRANSPARENT;
+	case WM_ERASEBKGND:
+		return 1;
+	case WM_PAINT: {
+		PAINTSTRUCT ps;
+		HDC hdc = BeginPaint(hwnd, &ps);
+		if (g_pVideoControl) g_pVideoControl->RepaintVideo();
+		else FillRect(hdc, &ps.rcPaint, (HBRUSH)GetStockObject(BLACK_BRUSH));
+		EndPaint(hwnd, &ps);
+		return 0;
+	}
+	}
+	return DefWindowProc(hwnd, msg, wParam, lParam);
+}
 
 
