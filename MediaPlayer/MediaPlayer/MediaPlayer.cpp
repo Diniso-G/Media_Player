@@ -950,3 +950,78 @@ static void DrawGlyph(Graphics& g, int id, const RectF& r, Color col) {
 	}
 	}
 }
+
+
+//Control bar layout, hit testing and painting
+static bool ShowSpeed(float w) { return w >= SF(720); }
+static bool ShowVolText(float w) { return w >= SF(860); }
+
+static void ComputeLayout(float w) {
+	float m = SF(24), bs = SF(38), pb = SF(54), gap = SF(8), rowY = SF(76);
+
+	for (int i = 0; i < B_COUNT; i++) g_btn[i] = RectF();
+
+	float total = bs * 3 + pb + gap * 3;
+	float x = (w - total) / 2;
+	g_btn[B_STOP] = RectF(x, rowY - bs / 2, bs, bs);
+	x += bs + gap;
+	g_btn[B_PREV] = RectF(x, rowY - bs / 2, bs, bs);
+	x += bs + gap;
+	g_btn[B_PLAY] = RectF(x, rowY - pb / 2, pb, pb);
+	x += pb + gap;
+	g_btn[B_NEXT] = RectF(x, rowY - bs / 2, bs, bs);
+
+	g_btn[B_OPEN] = RectF(m, rowY - bs / 2, bs, bs);
+	g_btn[B_FS] = RectF(w - m - bs, rowY - bs / 2, bs, bs);
+	
+	float rx = g_btn[B_FS].X - SF(10);
+	g_volText = RectF();
+
+	if (ShowVolText(w)) {
+		g_volText = RectF(rx - SF(42), rowY - SF(12), SF(42), SF(24));
+		rx = g_volText.X - SF(4);
+	}
+	g_volTrack = RectF(rx - SF(84), rowY - SF(3), SF(84), SF(6));
+	g_btn[B_MUTE] = RectF(g_volTrack.X - SF(6) - bs, rowY - bs / 2, bs, bs);
+	if (ShowSpeed(w))
+		g_btn[B_SPEED] = RectF(g_btn[B_MUTE].X - gap - SF(54), rowY - SF(14), SF(54), SF(28));
+
+	float cy = SF(40);
+	g_timeL = RectF(m, cy - SF(11), SF(56), SF(22));
+	g_timeR = RectF(w - m - SF(56), cy - SF(11), SF(56), SF(22));
+	g_seekTrack = RectF(m + SF(62), cy - SF(3), w - 2 * m - SF(124), SF(6));
+}
+
+static bool IsEnabled(int id) {
+	switch (id) {
+	case B_OPEN: case B_MUTE: case B_FS: case B_SPEED: return true;
+	case B_PLAY: return !g_playlist.empty() || CanControl();
+	case B_STOP: return CanControl() && g_state != PlayerState::STOPPED;
+	case B_PREV: return CanControl();
+	case B_NEXT: return g_index + 1 < (int)g_playlist.size();
+	}
+	return false;
+}
+
+static int HitTest(float x, float y) {
+	for (int i = 0; i < B_COUNT; i++) {
+		if (g_btn[i].Width > 0 && g_btn[i].Contains(x, y)) return i;
+	}
+	if (y >= g_seekTrack.Y - SF(14) && y <= g_seekTrack.GetBottom() + SF(14) && x >= g_seekTrack.X - SF(8) && x <= g_seekTrack.GetRight() + SF(8)) return HOT_SEEK;
+	if (y >= g_volTrack.Y - SF(14) && y <= g_volTrack.GetBottom() + SF(14) && x >= g_volTrack.X - SF(6) && x <= g_volTrack.GetRight() + SF(6)) return HOT_VOL;
+	return HOT_NONE;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
