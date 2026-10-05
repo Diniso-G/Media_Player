@@ -1509,3 +1509,192 @@ static void ExecCommand(int id) {
 	}
 	}
 }
+
+
+//Main Window
+static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+	switch (msg)
+	{
+	case WM_CREATE: {
+		g_hwndMain = hwnd;
+		g_dpi = GetDpiForWindow(hwnd);
+		g_hwndVideo = CreateWindowExW(0, L"MediaPlayerVideo", nullptr, WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 10, 10, hwnd, nullptr, g_hInst, nullptr);
+		g_hwndCtl = CreateWindowExW(0, L"MediaPlayerControls", nullptr, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0, 0, 10, 10, hwnd, nullptr, g_hInst, nullptr);
+		DragAcceptFiles(hwnd, TRUE);
+		SetTimer(hwnd, TIMER_IDLE, 250, nullptr);
+		g_lastActivity = GetTickCount64();
+		return 0;
+	}
+	case WM_SIZE: {
+		Layout();
+		return 0;
+	}
+	case WM_GETMINMAXINFO: {
+		MINMAXINFO* mm = (MINMAXINFO*)lParam;
+		RECT r = { 0, 0, SI(640), SI(kBarHeight) + SI(300) };
+		AdjustWindowRectExForDpi(&r, (DWORD)GetWindowLongPtr(hwnd, GWL_STYLE), FALSE, (DWORD)GetWindowLongPtr(hwnd, GWL_EXSTYLE), g_dpi);
+		if (!g_fullscreen) {
+			mm->ptMinTrackSize.x = r.right - r.left;
+			mm->ptMinTrackSize.y = r.bottom - r.top;
+		}
+		return 0;
+	}
+	case WM_DPICHANGED: {
+		g_dpi = HIWORD(wParam);
+		RECT* sug = (RECT*)lParam;
+		SetWindowPos(hwnd, nullptr, sug->left, sug->top, sug->right - sug->left, sug->bottom - sug->top, SWP_NOZORDER | SWP_NOACTIVATE);
+		Layout();
+		InvalidateControls();
+		return 0;
+	}
+	case WM_PAINT: {
+		PaintStage(hwnd);
+		return 0;
+	}
+
+	case WM_ERASEBKGND:
+		return 1;
+
+	case WM_TIMER: {
+		if (wParam == TIMER_PROGRESS)
+			UpdateProgress();
+		else if (wParam == TIMER_ANIM) {
+			if (!g_hasVideo && g_state == PlayerState::STARTED)
+				InvalidateRect(hwnd, &g_stageRect, FALSE);
+		}
+		else if (wParam == TIMER_IDLE) {
+			if (g_fullscreen && !g_uiHidden && g_state == PlayerState::STARTED && GetTickCount64() - g_lastActivity > 2500) {
+				POINT pt;
+				GetCursorPos(&pt);
+				RECT cr;
+				GetWindowRect(g_hwndCtl, &cr);
+				if (!PtInRect(&cr, pt) && !g_dragSeek && !g_dragVol) {
+					g_uiHidden = true;
+					ShowWindow(g_hwndCtl, SW_HIDE);
+					SetCursor(nullptr);
+				}
+			}
+		}
+		return 0;
+	}
+	case WM_SETCURSOR: {
+		if (g_fullscreen && g_uiHidden && LOWORD(lParam) == HTCLIENT) {
+			SetCursor(nullptr);
+			return TRUE;
+		}
+		break;
+	}
+	case WM_MOUSEMOVE: {
+		ActivityPing();
+		return 0;
+	}
+	case WM_LBUTTONDOWN: {
+		SetFocus(hwnd);
+		if (CanControl()) TogglePlay();
+		return 0;
+	}
+	case WM_LBUTTONDBLCLK: {
+		if (CanControl()) TogglePlay();
+		ToggleFullscreen();
+		return 0;
+	}
+	case WM_MOUSEWHEEL: {
+		SetVolume(g_volume + (GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? 0.05f : -0.05f));
+		ActivityPing();
+		return 0;
+	}
+	case WM_CONTEXTMENU: {
+		ShowContextMenu(hwnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+		return 0;
+	}
+	case WM_COMMAND: {
+		ExecCommand(LOWORD(wParam));
+		return 0;
+	}
+	case WM_SYSKEYDOWN: {
+		if (wParam == VK_RETURN) {
+			ToggleFullscreen();
+			return 0;
+		}
+		break;
+	}
+	case WM_KEYDOWN: {
+		bool ctrl = GetKeyState(VK_CONTROL) < 0, shift = GetKeyState(VK_SHIFT) < 0;
+		ActivityPing();
+		switch (wParam) {
+		case VK_SPACE:
+		case 'K': TogglePlay(); break;
+		case VK_ESCAPE: {
+			if (g_fullscreen) ToggleFullscreen();
+			else Stop();
+			break;
+		}
+		case 'F':
+		case VK_F11:
+			ToggleFullscreen();
+			break;
+		case 'O':
+			if (ctrl) ExecCommand(CMD_OPEN);
+			break;
+		case 'M': ToggleMute(); break;
+		case 'N': NextTrack(); break;
+		case 'P': PrevTrack(); break;
+		case 'T': ExecCommand(CMD_TOPMOST); break;
+		case 'J': SkipBy(-10); break;
+		case 'L': SkipBy(10); break;
+		case '0':
+		case VK_HOME:
+			SeekTo(0);
+			break;
+		case VK_OEM_4:
+			SetRateIndex(g_rateIdx - 1);
+			break;
+		case VK_OEM_6:
+			SetRateIndex(g_rateIdx + 1);
+			break;
+		case VK_UP:
+			SetVolume(g_volume + 0.05f);
+			break;
+		case VK_DOWN:
+			SetVolume(g_volume - 0.05f);
+			break;
+		case VK_LEFT:
+			SkipBy(ctrl ? -60 : (shift ? -30 : -5));
+			break;
+		case VK_RIGHT:
+			SkipBy(ctrl ? 60 : (shift ? 30 : 5));
+			break;
+		}
+		return 0;
+	}
+	case WM_DROPFILES: {
+		HDROP drop = (HDROP)wParam;
+		UINT n = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+		std::vector<std::wstring> files;
+		for (UINT i = 0; i < n; i++) {
+			wchar_t path[MAX_PATH * 2] = {};
+			if (DragQueryFileW(drop, i, path, MAX_PATH * 2))
+				files.push_back(path);
+		}
+		DragFinish(drop);
+		SetPlaylist(files);
+		return 0;
+	}
+	case WM_APP_SESSION_EVENT: {
+		IMFMediaEvent* ev = reinterpret_cast<IMFMediaEvent*>(lParam);
+		if ((DWORD)wParam == g_gen && g_pSession) HandleSessionEvent(ev);
+		ev->Release();
+		return 0;
+	}
+	case WM_DESTROY: {
+		KillTimer(hwnd, TIMER_IDLE);
+		SaveSettings();
+		CloseSession();
+		PostQuitMessage(0);
+		return 0;
+	}
+	}
+	return DefWindowProcA(hwnd, msg, wParam, lParam);
+}
+
+
