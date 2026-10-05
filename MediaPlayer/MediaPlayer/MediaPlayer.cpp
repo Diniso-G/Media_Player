@@ -1159,7 +1159,7 @@ static void PaintControls(HWND hwnd) {
 
 static void ExecCommand(int id);
 
-static LRESULT CALLBACK ControlProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+static LRESULT CALLBACK ControlsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 	switch (msg)
 	{
 	case WM_ERASEBKGND:
@@ -1242,7 +1242,7 @@ static LRESULT CALLBACK ControlProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 }
 
 
-//Video windo and the stage/empty screen
+//Video window and the stage/empty screen
 static LRESULT CALLBACK VideoProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 	switch (msg)
 	{
@@ -1371,7 +1371,7 @@ static void PaintStage(HWND hwnd) {
 			if (!g_error.empty()) sub = g_error;
 			else if (g_playlist.size() > 1) {
 				wchar_t b[64];
-				swprintf_s(b, L"Track %d of $d", g_index + 1, (int)g_playlist.size());
+				swprintf_s(b, L"Track %d of %d", g_index + 1, (int)g_playlist.size());
 				sub = b;
 			}
 			else sub = playing ? L"Now playing" : (g_state == PlayerState::PAUSED ? L"Paused" : L"");
@@ -1513,6 +1513,9 @@ static void ExecCommand(int id) {
 
 //Main Window
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+	wchar_t dbg[64];
+	swprintf_s(dbg, L"msg 0x%04X\n", msg);
+	OutputDebugString(dbg);
 	switch (msg)
 	{
 	case WM_CREATE: {
@@ -1694,7 +1697,83 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 		return 0;
 	}
 	}
-	return DefWindowProcA(hwnd, msg, wParam, lParam);
+	return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
+	g_hInst = hInstance;
+	SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
+	if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE))) return 1;
+	if (FAILED(MFStartup(MF_VERSION))) {
+		MessageBoxW(nullptr, L"Media Foundation could no be start.", L"Media Player", MB_OK | MB_ICONERROR);
+		CoUninitialize();
+		return 1;
+	}
+	GdiplusStartupInput gsi;
+	GdiplusStartup(&g_gdiplusToken, &gsi, nullptr);
+	LoadSettings();
+	
+	HICON icon = (HICON)LoadImageW(hInstance, MAKEINTRESOURCE(IDI_MEDIAPLAYER), IMAGE_ICON, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR);
+	HICON iconSm = (HICON)LoadImageW(hInstance, MAKEINTRESOURCE(IDI_SMALL), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
+
+	WNDCLASSEXW wc = { sizeof(wc) };
+	wc.style = CS_DBLCLKS;
+	wc.lpfnWndProc = WndProc;
+	wc.hInstance = hInstance;
+	wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+	wc.lpszClassName = L"MediaPlayerClass";
+
+	wc.hIcon = icon;
+	wc.hIconSm = iconSm;
+
+	RegisterClassExW(&wc);
+
+	WNDCLASSEXW vc = { sizeof(vc) };
+	vc.lpfnWndProc = VideoProc;
+	vc.hInstance = hInstance;
+	vc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+	vc.lpszClassName = L"MediaPlayerVideo";
+
+	RegisterClassExW(&vc);
+
+	WNDCLASSEXW cc = { sizeof(cc) };
+	cc.lpfnWndProc = ControlsProc;
+	cc.hInstance = hInstance;
+	cc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+	cc.lpszClassName = L"MediaPlayerControls";
+
+	RegisterClassExW(&cc);
+
+	UINT dpi = GetDpiForSystem();
+	RECT r = { 0, 0, MulDiv(1000, dpi, 96), MulDiv(640, dpi, 96) };
+	DWORD style = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
+	AdjustWindowRectExForDpi(&r, style, FALSE, WS_EX_ACCEPTFILES, dpi);
+
+	HWND hwnd = CreateWindowExW(WS_EX_ACCEPTFILES, L"MediaPlayerClass", L"Media Player", style, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, nullptr, nullptr, hInstance, nullptr);
+	if (!hwnd) return 1;
+	ApplyVolume();
+	Layout();
+	ShowWindow(hwnd, nCmdShow);
+	UpdateWindow(hwnd);
+
+	int argc = 0;
+	LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+	if (argv) {
+		std::vector<std::wstring> files;
+		for (int i = 1; i < argc; i++) files.push_back(argv[i]);
+		LocalFree(argv);
+		SetPlaylist(files);
+	}
+	MSG msg = {};
+	while (GetMessage(&msg, nullptr, 0, 0) > 0) {
+		TranslateMessage(&msg);
+		DispatchMessage(&msg);
+	}
+
+	if (g_bgCache) DeleteObject(g_bgCache);
+	GdiplusShutdown(g_gdiplusToken);
+	MFShutdown();
+	CoUninitialize();
+	return (int)msg.wParam;
+}
