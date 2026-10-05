@@ -1389,3 +1389,123 @@ static void PaintStage(HWND hwnd) {
 	EndPaint(hwnd, &ps);
 }
 
+
+//Menus, commands and about
+static INT_PTR CALLBACK AboutProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM) {
+	if (msg == WM_INITDIALOG) return TRUE;
+	if (msg == WM_COMMAND && (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL)) {
+		EndDialog(dlg, LOWORD(wParam));
+		return TRUE;
+	}
+	return FALSE;
+}
+
+static void ShowContextMenu(HWND hwnd, int x, int y) {
+	if (x == -1 && y == -1) {
+		RECT rc;
+		GetWindowRect(hwnd, &rc);
+		x = (rc.left + rc.right) / 2;
+		y = (rc.top + rc.bottom) / 2;
+	}
+
+	HMENU m = CreatePopupMenu(), recent = CreatePopupMenu(), speed = CreatePopupMenu();
+	if (g_recent.empty()) {
+		AppendMenuW(recent, MF_STRING | MF_GRAYED, 0, L"(empty)");
+	}
+	else {
+		for (size_t i = 0; i < g_recent.size(); i++) {
+			AppendMenuW(recent, MF_STRING, CMD_RECENT_BASE + (UINT)i, FileNameOf(g_recent[i]).c_str());
+		}
+		AppendMenuW(recent, MF_SEPARATOR, 0, nullptr);
+		AppendMenuW(recent, MF_STRING, CMD_CLEARRECENT, L"Clear list");
+	}
+	for (int i = 0; i < kRateCount; i++) {
+		wchar_t b[24];
+		swprintf_s(b, L"%gx", kRates[i]);
+		AppendMenuW(speed, MF_STRING | (i == g_rateIdx ? MF_CHECKED : 0), CMD_SPEED_BASE + i, b);
+	}
+	AppendMenuW(m, MF_STRING, CMD_OPEN, L"Open file...\tCtrl + O");
+	AppendMenuW(m, MF_POPUP, (UINT_PTR)recent, L"Open recent");
+	AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+	AppendMenuW(m, MF_STRING, CMD_PLAYPAUSE, g_state == PlayerState::STARTED ? L"Pause\tSpace" : L"Play\tSpace");
+	AppendMenuW(m, MF_STRING | IsEnabled(B_STOP) ? 0 : MF_GRAYED, CMD_STOP, L"Stop\tEsc");
+	AppendMenuW(m, MF_STRING | IsEnabled(B_PREV) ? 0 : MF_GRAYED, CMD_PREV, L"Previous\tP");
+	AppendMenuW(m, MF_STRING | IsEnabled(B_NEXT) ? 0 : MF_GRAYED, CMD_NEXT, L"Next\tN");
+	AppendMenuW(m, MF_POPUP, (UINT_PTR)speed, L"Playback speed");
+	AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+	AppendMenuW(m, MF_STRING | (g_fullscreen ? MF_CHECKED : 0), CMD_FULLSCREEN, L"Full screen\tF");
+	AppendMenuW(m, MF_STRING | (g_topmost ? MF_CHECKED : 0), CMD_TOPMOST, L"Always on top\tT");
+	AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+	AppendMenuW(m, MF_STRING, CMD_ABOUT, L"About");
+	AppendMenuW(m, MF_STRING, CMD_EXIT, L"Exit");
+
+	g_lastActivity = GetTickCount64();
+	SetForegroundWindow(hwnd);
+	TrackPopupMenu(m, TPM_RIGHTBUTTON, x, y, 0, hwnd, nullptr);
+	DestroyMenu(m);
+}
+
+static void ExecCommand(int id) {
+	if (id >= CMD_RECENT_BASE && id < CMD_RECENT_BASE + kMaxRecent) {
+		size_t i = (size_t)(id - CMD_RECENT_BASE);
+		if (i < g_recent.size()) SetPlaylist({ g_recent[i] });
+		return;
+	}
+	if (id >= CMD_SPEED_BASE && id < CMD_SPEED_BASE + kRateCount) {
+		SetRateIndex(id - CMD_SPEED_BASE);
+		return;
+	}
+
+	switch (id) {
+	case CMD_OPEN: {
+		SetPlaylist(OpenMediaFiles(g_hwndMain));
+		break;
+	}
+	case CMD_PLAYPAUSE: {
+		TogglePlay();
+		break;
+	}
+	case CMD_STOP: {
+		Stop();
+		break;
+	}
+	case CMD_PREV: {
+		PrevTrack();
+		break;
+	}
+	case CMD_NEXT: {
+		NextTrack();
+		break;
+	}
+	case CMD_SPEED: {
+		SetRateIndex((g_rateIdx + 1) % kRateCount);
+		break;
+	}
+	case CMD_MUTE: {
+		ToggleMute();
+		break;
+	}
+	case CMD_FULLSCREEN: {
+		ToggleFullscreen();
+		break;
+	}
+	case CMD_TOPMOST: {
+		g_topmost = !g_topmost;
+		SetWindowPos(g_hwndMain, g_topmost ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+		break;
+	}
+	case CMD_CLEARRECENT: {
+		g_recent.clear();
+		SaveSettings();
+		break;
+	}
+	case CMD_ABOUT: {
+		DialogBox(g_hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), g_hwndMain, AboutProc);
+		break;
+	}
+	case CMD_EXIT: {
+		DestroyWindow(g_hwndMain);
+		break;
+	}
+	}
+}
