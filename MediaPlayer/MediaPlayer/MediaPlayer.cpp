@@ -59,7 +59,7 @@ enum Cmd {
 };
 
 enum BtdId {
-	B_OPEN, B_PLAY, B_STOP, B_PREV, B_NEXT, B_SPEED, B_MUTE, B_FS, B_COUNT
+	B_OPEN, B_STOP, B_PREV, B_PLAY, B_NEXT, B_SPEED, B_MUTE, B_FS, B_COUNT
 };
 
 enum {HOT_NONE = -1, HOT_SEEK = 100, HOT_VOL = 101};
@@ -72,12 +72,12 @@ static const int kRateCount = 6;
 static const int kMaxRecent = 10;
 static const float kBarHeight = 104.0f;
 
-static Color ColAccentA() { return Color(225, 139, 124, 255); }
-static Color ColAccentB() { return Color(225, 236, 110, 190); }
-static Color ColText() { return Color(225, 236, 236, 246); }
-static Color ColTextDim() { return Color(225, 150, 150, 176); }
-static Color ColIcon() { return Color(225, 224, 224, 236); }
-static Color ColIconOff() { return Color(225, 84, 84, 104); }
+static Color ColAccentA() { return Color(255, 139, 124, 255); }
+static Color ColAccentB() { return Color(255, 236, 110, 190); }
+static Color ColText() { return Color(255, 236, 236, 246); }
+static Color ColTextDim() { return Color(255, 150, 150, 176); }
+static Color ColIcon() { return Color(255, 224, 224, 236); }
+static Color ColIconOff() { return Color(255, 84, 84, 104); }
 
 //Smart pointer, global state and helpers
 template <class T>
@@ -276,7 +276,7 @@ public:
 		IMFMediaEvent* ev = nullptr;
 		if (SUCCEEDED(s->EndGetEvent(pResult, &ev))) {
 			MediaEventType t = MEUnknown;
-			ev->AddRef();
+			ev->GetType(&t);
 
 			if (t == MESessionClosed) SetEvent(m_closed);
 			if (!PostMessage(m_hwnd, WM_APP_SESSION_EVENT, (WPARAM)m_gen, (LPARAM)ev))
@@ -364,6 +364,7 @@ static HRESULT CreateTopology(IMFTopology** ppTopo, bool* hasVideo) {
 		}
 	}
 	if (connected == 0) return MF_E_TOPO_CODEC_NOT_FOUND;
+	topo->SetUINT32(MF_TOPOLOGY_HARDWARE_MODE, MFTOPOLOGY_HWMODE_USE_HARDWARE);
 
 	*ppTopo = topo.get();
 	(*ppTopo)->AddRef();
@@ -574,7 +575,7 @@ static HRESULT OpenURL(const std::wstring& url) {
 		std::wstring name = g_title;
 		CloseSession();
 		g_title = name;
-		g_error = L"This file couldn't be opened. The format or codec may bot be supported.";
+		g_error = L"This file couldn't be opened. The format or codec may not be supported.";
 	}
 	UpdateTitle();
 	InvalidateControls();
@@ -611,7 +612,7 @@ static void Play() {
 		if (g_state == PlayerState::CLOSED && g_index >= 0) PlayIndex(g_index);
 		return;
 	}
-	if (g_state == PlayerState::STOPPED) return;
+	if (g_state == PlayerState::STARTED) return;
 	g_pauseAfterStart = false;
 	MFTIME zero = 0;
 	if (g_state == PlayerState::STOPPED) SessionStart(&zero);
@@ -674,8 +675,10 @@ static void UpdateProgress() {
 	MFTIME pos = 0;
 	if (SUCCEEDED(pc->GetTime(&pos))) {
 		if (pos > g_duration) pos = g_duration;
+		MFTIME oldPos = g_currentPos;
 		g_currentPos = pos;
-		InvalidateControls();
+		if (pos / 10000000LL != oldPos / 10000000LL)
+			InvalidateControls();
 	}
 }
 
@@ -859,7 +862,7 @@ static void DrawGlyph(Graphics& g, int id, const RectF& r, Color col) {
 	case B_PLAY: {
 		if (g_state == PlayerState::STARTED) {
 			FillRound(g, fill, RectF(cx - 0.95f * s, cy - s, 0.7f * s, 2 * s), s * 0.2f);
-			FillRound(g, fill, RectF(cx - 0.25f * s, cy - s, 0.7f * s, 2 * s), s * 0.2f);
+			FillRound(g, fill, RectF(cx + 0.25f * s, cy - s, 0.7f * s, 2 * s), s * 0.2f);
 		}
 		else {
 			PointF pts[3] = {
@@ -876,7 +879,7 @@ static void DrawGlyph(Graphics& g, int id, const RectF& r, Color col) {
 		break;
 	}
 	case B_PREV: {
-		FillRound(g, fill, RectF(cx - 0.1f * s, cy - 0.9F * s, 0.3f * s, 1.8F * s), s * 0.1f);
+		FillRound(g, fill, RectF(cx - 1.0f * s, cy - 0.9f * s, 0.3f * s, 1.8f * s), s * 0.1f);
 		PointF pts[3] = {
 				PointF(cx + 1.0f * s, cy - 0.9f * s),
 				PointF(cx + 1.0f * s, cy + 0.9f * s),
@@ -886,7 +889,7 @@ static void DrawGlyph(Graphics& g, int id, const RectF& r, Color col) {
 		break;
 	}
 	case B_NEXT: {
-		FillRound(g, fill, RectF(cx + 0.7f * s, cy - 0.9F * s, 0.3f * s, 1.8F * s), s * 0.1f);
+		FillRound(g, fill, RectF(cx + 0.7f * s, cy - 0.9f * s, 0.3f * s, 1.8f * s), s * 0.1f);
 		PointF pts[3] = {
 				PointF(cx - 1.0f * s, cy - 0.9f * s),
 				PointF(cx - 1.0f * s, cy + 0.9f * s),
@@ -898,7 +901,7 @@ static void DrawGlyph(Graphics& g, int id, const RectF& r, Color col) {
 	case B_OPEN: {
 		PointF pts[6] = {
 				PointF(cx - 1.1f * s, cy + 0.9f * s),
-				PointF(cx - 1.1f * s, cy - 0.5f * s),
+				PointF(cx - 1.1f * s, cy - 0.9f * s),
 				PointF(cx - 0.2f * s, cy - 0.9f * s),
 				PointF(cx + 0.1f * s, cy - 0.5f * s),
 				PointF(cx + 1.1f * s, cy - 0.5f * s),
@@ -908,8 +911,8 @@ static void DrawGlyph(Graphics& g, int id, const RectF& r, Color col) {
 		break;
 	}
 	case B_MUTE: {
-		float ox = cx = 0.5f * s;
-		FillRound(g, fill, RectF(ox - 0.1f * s, cy - 0.5f * s, 0.6f * s, 1.0f * s), s * 0.1f);
+		float ox = cx - 0.5f * s;
+		FillRound(g, fill, RectF(ox - 1.0f * s, cy - 0.5f * s, 0.6f * s, 1.0f * s), s * 0.1f);
 		PointF cone[4] = {
 				PointF(ox - 0.45f * s, cy - 0.5f * s),
 				PointF(ox + 0.4f * s, cy - 1.1f * s),
@@ -1033,7 +1036,7 @@ static void PaintControls(HWND hwnd) {
 		g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
 		ComputeLayout((float)w);
 
-		LinearGradientBrush bg(RectF(0, 0, (float)w, (float)h), Color(255, 28, 26, 24), Color(255, 17, 16, 27), LinearGradientModeVertical);
+		LinearGradientBrush bg(RectF(0, 0, (float)w, (float)h), Color(255, 28, 26, 42), Color(255, 17, 16, 27), LinearGradientModeVertical);
 
 		g.FillRectangle(&bg, 0, 0, w, h);
 		Pen edge(Color(36, 255, 255, 255), 1.0f);
@@ -1041,7 +1044,7 @@ static void PaintControls(HWND hwnd) {
 
 		bool seekHot = (g_hot == HOT_SEEK) || g_dragSeek;
 		bool canSeek = CanControl() && g_duration > 0;
-		float frac = g_dragSeek ? g_seekFrac : (g_duration > 0 ? Clamp01((float)((double)g_duration)) : 0.0f);
+		float frac = g_dragSeek ? g_seekFrac : (g_duration > 0 ? Clamp01((float)((double)g_currentPos / (double)g_duration)) : 0.0f);
 		MFTIME shown = g_dragSeek ? (MFTIME)(frac * (double)g_duration) : g_currentPos;
 
 		DrawLabel(g, FormatTime(shown), SF(12.5f), FontStyleRegular, g_timeL, ColText(), StringAlignmentNear);
@@ -1187,7 +1190,12 @@ static LRESULT CALLBACK ControlsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
 		InvalidateRect(hwnd, nullptr, FALSE);
 		return 0;
 	}
-
+	case WM_MOUSELEAVE: {
+		g_trackingLeave = false;
+		if (!g_dragSeek && !g_dragVol) g_hot = HOT_NONE;
+		InvalidateRect(hwnd, nullptr, FALSE);
+		return 0;
+	}
 	case WM_LBUTTONDOWN:
 	case WM_LBUTTONDBLCLK: {
 		float x = (float)GET_X_LPARAM(lParam), y = (float)GET_Y_LPARAM(lParam);
@@ -1284,6 +1292,8 @@ static void RebuildStageBackground(HDC ref, int w, int h) {
 		PathGradientBrush pg(&gp);
 		pg.SetCenterColor(Color(90, 120, 96, 255));
 		Color edge(0, 120, 96, 255);
+		int n = 1;
+		pg.SetSurroundColors(&edge, &n);
 		g.FillPath(&pg, &gp);
 	}
 	SelectObject(mdc, old);
@@ -1309,7 +1319,7 @@ static void PaintStage(HWND hwnd) {
 		HGDIOBJ co = SelectObject(cdc, g_bgCache);
 		BitBlt(mdc, 0, 0, w, h, cdc, 0, 0, SRCCOPY);
 		SelectObject(cdc, co);
-		DeleteObject(cdc);
+		DeleteDC(cdc);
 
 		Graphics g(mdc);
 		g.SetSmoothingMode(SmoothingModeAntiAlias);
@@ -1428,9 +1438,9 @@ static void ShowContextMenu(HWND hwnd, int x, int y) {
 	AppendMenuW(m, MF_POPUP, (UINT_PTR)recent, L"Open recent");
 	AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
 	AppendMenuW(m, MF_STRING, CMD_PLAYPAUSE, g_state == PlayerState::STARTED ? L"Pause\tSpace" : L"Play\tSpace");
-	AppendMenuW(m, MF_STRING | IsEnabled(B_STOP) ? 0 : MF_GRAYED, CMD_STOP, L"Stop\tEsc");
-	AppendMenuW(m, MF_STRING | IsEnabled(B_PREV) ? 0 : MF_GRAYED, CMD_PREV, L"Previous\tP");
-	AppendMenuW(m, MF_STRING | IsEnabled(B_NEXT) ? 0 : MF_GRAYED, CMD_NEXT, L"Next\tN");
+	AppendMenuW(m, MF_STRING | (IsEnabled(B_STOP) ? 0 : MF_GRAYED), CMD_STOP, L"Stop\tEsc");
+	AppendMenuW(m, MF_STRING | (IsEnabled(B_PREV) ? 0 : MF_GRAYED), CMD_PREV, L"Previous\tP");
+	AppendMenuW(m, MF_STRING | (IsEnabled(B_NEXT) ? 0 : MF_GRAYED), CMD_NEXT, L"Next\tN");
 	AppendMenuW(m, MF_POPUP, (UINT_PTR)speed, L"Playback speed");
 	AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
 	AppendMenuW(m, MF_STRING | (g_fullscreen ? MF_CHECKED : 0), CMD_FULLSCREEN, L"Full screen\tF");
@@ -1513,9 +1523,6 @@ static void ExecCommand(int id) {
 
 //Main Window
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-	wchar_t dbg[64];
-	swprintf_s(dbg, L"msg 0x%04X\n", msg);
-	OutputDebugString(dbg);
 	switch (msg)
 	{
 	case WM_CREATE: {
