@@ -36,6 +36,11 @@ using std::max;
 #include <cmath>
 #include <cstdio>
 
+#include <mfmediaengine.h>
+#include <d3d11_4.h>
+#include <dxgi1_2.h>
+#include <shlwapi.h>
+
 #include "resource.h"
 
 #pragma comment(lib, "comctl32.lib")
@@ -52,6 +57,10 @@ using std::max;
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "ole32.lib")
 
+#pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "shlwapi.lib")
+
 using namespace Gdiplus;
 
 enum Cmd {
@@ -66,6 +75,7 @@ enum {HOT_NONE = -1, HOT_SEEK = 100, HOT_VOL = 101};
 
 enum {TIMER_PROGRESS = 1, TIMER_IDLE = 2, TIMER_ANIM = 3};
 #define WM_APP_SESSION_EVENT (WM_APP + 1)
+#define WM_APP_ENGINE_EVENT (WM_APP + 2)
 
 static const float kRates[] = { 0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f };
 static const int kRateCount = 6;
@@ -297,7 +307,221 @@ private:
 
 static SessionCallback* g_pCallback = nullptr;
 
+static ID3D11Device* g_pD3D = nullptr;
+static ID3D11DeviceContext* g_pD3DCtx = nullptr;
+static IMFDXGIDeviceManager* g_pDxgiMgr = nullptr;
+static UINT g_dxgiToken = 0;
+static IDXGISwapChain1* g_pSwap = nullptr;
 
+static HRESULT InitGraphics() {
+	UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
+	D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0 };
+	HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, levels, ARRAYSIZE(levels), D3D11_SDK_VERSION, &g_pD3D, nullptr, &g_pD3DCtx);
+	if (FAILED(hr)) return hr;
+
+	Com<ID3D11Multithread> mt;
+	if (SUCCEEDED(g_pD3D->QueryInterface(IID_PPV_ARGS(mt.put()))))
+		mt->SetMultithreadProtected(TRUE);
+
+	hr = MFCreateDXGIDeviceManager(&g_dxgiToken, &g_pDxgiMgr);
+	if (FAILED(hr)) return hr;
+	return g_pDxgiMgr->ResetDevice(g_pD3D, g_dxgiToken);
+}
+
+static void ShutdownGraphics() {
+	SafeRelease(&g_pDxgiMgr);
+	SafeRelease(&g_pD3DCtx);
+	SafeRelease(&g_pD3D);
+	SafeRelease(&g_pSwap);
+}
+
+static LONG g_engineErr = 0;
+
+class EngineCallback : public IMFMediaEngineNotify {
+public :
+	EngineCallback(HWND hwnd, DWORD gen) : m_hwnd(hwnd), m_gen(gen) {}
+
+	STDMETHODIMP QueryInterface(REFIID riid, void** ppv) {
+		if (riid == __uuidof(IMFMediaEngineNotify) || riid == __uuidof(IUnknown)) {
+			*ppv = static_cast<IMFMediaEngineNotify*>(this);
+			AddRef();
+			return S_OK;
+		}
+		*ppv = nullptr;
+		return E_NOINTERFACE;
+	}
+	STDMETHODIMP_(ULONG) AddRef() { return InterlockedIncrement(&m_ref); }
+	STDMETHODIMP_(ULONG) Release() {
+		ULONG r = InterlockedDecrement(&m_ref);
+		if (r == 0) delete this;
+		return r;
+	}
+	STDMETHODIMP EventNotify(DWORD ev, DWORD_PTR param1, DWORD param2) {
+		if (ev == MF_MEDIA_ENGINE_EVENT_ERROR) g_engineErr = (LONG)param2;
+		PostMessage(m_hwnd, WM_APP_ENGINE_EVENT, (WPARAM)m_gen, (LPARAM)ev);
+		return S_OK;
+	}
+private:
+	LONG m_ref = 1;
+	HWND m_hwnd;
+	DWORD m_gen;
+};
+
+static IMFMediaEngine* g_pEngine = nullptr;
+static EngineCallback* g_pEngineNotify = nullptr;
+
+static HRESULT CreateEngine() {
+	g_pEngineNotify = new EngineCallback(g_hwndMain, g_gen);
+
+	Com<IMFMediaEngineClassFactory> factory;
+	HRESULT hr = CoCreateInstance(CLSID_MFMediaEngineClassFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(factory.put()));
+	if (FAILED(hr)) return hr;
+
+	Com<IMFAttributes> attrs;
+	hr = MFCreateAttributes(attrs.put(), 3);
+	if (FAILED(hr)) return hr;
+
+	attrs->SetUnknown(MF_MEDIA_ENGINE_DXGI_MANAGER, g_pDxgiMgr);
+	attrs->SetUnknown(MF_MEDIA_ENGINE_CALLBACK, g_pEngineNotify);
+	attrs->SetUINT32(MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM);
+
+	return factory->CreateInstance(0, attrs.get(), &g_pEngine);
+}
+
+static void DestroyEngine() {
+	if (g_pEngine) {
+		g_pEngine->Shutdown();
+		SafeRelease(&g_pEngine);
+	}
+	SafeRelease(&g_pEngineNotify);
+}
+
+static void Layout();
+static HRESULT CreateVideoSwapChain(HWND hwnd, UINT w, UINT h);
+
+static HRESULT EngineOpen(const std::wstring& url) {
+	DestroyEngine();
+	g_gen++;
+	HRESULT hr = CreateEngine();
+	if (FAILED(hr)) return hr;
+
+	wchar_t fileUrl[2084];
+	DWORD n = ARRAYSIZE(fileUrl);
+	if (FAILED(UrlCreateFromPathW(url.c_str(), fileUrl, &n, 0)))
+		wcscpy_s(fileUrl, url.c_str());
+
+	BSTR b = SysAllocString(fileUrl);
+	hr = g_pEngine->SetSource(b);
+	SysFreeString(b);
+	return hr;
+}
+
+static void ResizeSwapChain(UINT w, UINT h) {
+	if (!g_pSwap || w == 0 || h == 0) return;
+	g_pSwap->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0);
+}
+
+static void EngineRenderFrame() {
+	if (!g_pEngine || !g_pSwap) return;
+	LONGLONG pts = 0;
+	if (g_pEngine->OnVideoStreamTick(&pts) != S_OK) return;
+
+	Com<ID3D11Texture2D> back;
+	if (FAILED(g_pSwap->GetBuffer(0, IID_PPV_ARGS(back.put())))) return;
+	D3D11_TEXTURE2D_DESC td = {};
+	back->GetDesc(&td);
+
+	DWORD vw = 0, vh = 0, ax = 0, ay = 0;
+	g_pEngine->GetNativeVideoSize(&vw, &vh);
+	g_pEngine->GetVideoAspectRatio(&ax, &ay);
+	if (!ax || !ay) {
+		ax = vw;
+		ay = vh;
+	}
+	if (!ax || !ay) return;
+
+	double aspect = (double)ax / (double)ay;
+	UINT dw = td.Width;
+	UINT dh = (UINT)(td.Width / aspect);
+	if (dh > td.Height) {
+		dh = td.Height;
+		dw = (UINT)(td.Height * aspect);
+	}
+
+	RECT dst;
+	dst.left = (LONG)((td.Width - dw) / 2);
+	dst.top = (LONG)((td.Height - dh) / 2);
+	dst.right = dst.left + (LONG)dw;
+	dst.bottom = dst.top + (LONG)dh;
+
+	MFVideoNormalizedRect src = { 0.0f, 0.0f, 1.0f, 1.0f };
+	MFARGB border = { 0, 0, 0, 255 };
+	g_pEngine->TransferVideoFrame(back.get(), &src, &dst, &border);
+	g_pSwap->Present(1, 0);
+}
+
+static void HandleEngineEvent(DWORD ev) {
+	switch (ev) {
+	case MF_MEDIA_ENGINE_EVENT_LOADEDMETADATA: {
+		DWORD vw = 0, vh = 0;
+		g_pEngine->GetNativeVideoSize(&vw, &vh);
+		g_hasVideo = (vw > 0 && vh > 0);
+		Layout();
+
+		if (g_hasVideo && !g_pSwap) {
+			RECT r;
+			GetClientRect(g_hwndVideo, &r);
+			CreateVideoSwapChain(g_hwndVideo, (UINT)max(1L, r.right), (UINT)max(1L, r.bottom));
+		}
+		g_pEngine->Play();
+		break;
+	}
+	case MF_MEDIA_ENGINE_EVENT_ERROR: {
+		wchar_t m[96];
+		swprintf_s(m, L"Media Engine error: 0x%08X", (unsigned)g_engineErr);
+		MessageBoxW(g_hwndMain, m, L"Media Player", MB_OK);
+		return;
+	}
+	}
+}
+
+static HRESULT CreateVideoSwapChain(HWND hwnd, UINT w, UINT h) {
+	Com<IDXGIDevice> dxgiDev;
+	HRESULT hr = g_pD3D->QueryInterface(IID_PPV_ARGS(dxgiDev.put()));
+	if (FAILED(hr)) return hr;
+	Com<IDXGIAdapter> adapter;
+	hr = dxgiDev->GetAdapter(adapter.put());
+	if (FAILED(hr)) return hr;
+	Com<IDXGIFactory2> factory;
+	hr = adapter->GetParent(IID_PPV_ARGS(factory.put()));
+	if (FAILED(hr)) return hr;
+
+	DXGI_SWAP_CHAIN_DESC1 d = {};
+	d.Width = w;
+	d.Height = h;
+	d.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+	d.SampleDesc.Count = 1;
+	d.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+	d.BufferCount = 2;
+	d.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+
+	SafeRelease(&g_pSwap);
+	hr = factory->CreateSwapChainForHwnd(g_pD3D, hwnd, &d, nullptr, nullptr, &g_pSwap);
+	if (SUCCEEDED(hr))
+		factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
+	return hr;
+}
+
+static void ClearSwapChain(float r, float g, float b) {
+	if (!g_pSwap) return;
+	Com<ID3D11Texture2D> back;
+	if (FAILED(g_pSwap->GetBuffer(0, IID_PPV_ARGS(back.put())))) return;
+	Com<ID3D11RenderTargetView> rtv;
+	if (FAILED(g_pD3D->CreateRenderTargetView(back.get(), nullptr, rtv.put()))) return;
+	float c[4] = { r, g, b, 1.0f };
+	g_pD3DCtx->ClearRenderTargetView(rtv.get(), c);
+	g_pSwap->Present(1, 0);
+}
 //Topology
 static HRESULT AddBranch(IMFTopology* topo, IMFPresentationDescriptor* pd, IMFStreamDescriptor* sd, HWND videoHwnd, bool* isVideo) {
 	
@@ -393,6 +617,7 @@ static void Layout() {
 		SetWindowPos(g_hwndCtl, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 		bool show = !g_fullscreen || !g_uiHidden;
 		ShowWindow(g_hwndCtl, show ? SW_SHOWNA : SW_HIDE);
+		ResizeSwapChain((UINT)w, (UINT)stageH);
 	}
 	if (g_pVideoControl) {
 		RECT vr = { 0, 0, w, stageH };
@@ -1262,7 +1487,7 @@ static LRESULT CALLBACK VideoProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
 		PAINTSTRUCT ps;
 		HDC hdc = BeginPaint(hwnd, &ps);
 		if (g_pVideoControl) g_pVideoControl->RepaintVideo();
-		else FillRect(hdc, &ps.rcPaint, (HBRUSH)GetStockObject(BLACK_BRUSH));
+		else if (!g_pSwap) FillRect(hdc, &ps.rcPaint, (HBRUSH)GetStockObject(BLACK_BRUSH));
 		EndPaint(hwnd, &ps);
 		return 0;
 	}
@@ -1696,6 +1921,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 		ev->Release();
 		return 0;
 	}
+	case WM_APP_ENGINE_EVENT: {
+		if ((DWORD)wParam == g_gen && g_pEngine) HandleEngineEvent((DWORD)lParam);
+		return 0;
+	}
 	case WM_DESTROY: {
 		KillTimer(hwnd, TIMER_IDLE);
 		SaveSettings();
@@ -1717,6 +1946,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 		CoUninitialize();
 		return 1;
 	}
+	if (FAILED(InitGraphics())) MessageBoxW(nullptr, L"Direct3D 11 could not start.", L"Media Player", MB_OK | MB_ICONERROR);
 	GdiplusStartupInput gsi;
 	GdiplusStartup(&g_gdiplusToken, &gsi, nullptr);
 	LoadSettings();
@@ -1763,6 +1993,27 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	Layout();
 	ShowWindow(hwnd, nCmdShow);
 	UpdateWindow(hwnd);
+	/*
+	{
+		RECT tr;
+		GetClientRect(g_hwndVideo, &tr);
+		ShowWindow(g_hwndVideo, SW_SHOWNA);
+		if (SUCCEEDED(CreateVideoSwapChain(g_hwndVideo, tr.right, tr.bottom)))
+			ClearSwapChain(0.1f, 0.2f, 0.6f);
+		else
+			MessageBoxW(nullptr, L"Swap chain failed.", L"Media Player", MB_OK);
+	}
+
+	
+	{
+		HRESULT thr = CreateEngine();
+		wchar_t tmsg[64];
+		if (SUCCEEDED(thr)) swprintf_s(tmsg, L"Media Engine created OK");
+		else swprintf_s(tmsg, L"Media Engine failed: 0x%08X", (unsigned)thr);
+		
+		MessageBoxW(hwnd, tmsg, L"Media Player", MB_OK);
+		DestroyEngine();
+	}*/
 
 	int argc = 0;
 	LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -1770,16 +2021,39 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 		std::vector<std::wstring> files;
 		for (int i = 1; i < argc; i++) files.push_back(argv[i]);
 		LocalFree(argv);
-		SetPlaylist(files);
+		if (!files.empty()) {
+			HRESULT thr = EngineOpen(files[0]);
+			if (FAILED(thr)) {
+				wchar_t tmsg[64];
+				swprintf_s(tmsg, L"EngineOpen failed: 0x%08X", (unsigned)thr);
+				MessageBoxW(hwnd, tmsg, L"Media Player", MB_OK);
+			}
+		}
+		//SetPlaylist(files);
 	}
 	MSG msg = {};
-	while (GetMessage(&msg, nullptr, 0, 0) > 0) {
-		TranslateMessage(&msg);
-		DispatchMessage(&msg);
+	bool running = true;
+	while (running) {
+		while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+			if (msg.message == WM_QUIT) { 
+				running = false;
+				break;
+			}
+			TranslateMessage(&msg);
+			DispatchMessage(&msg);
+		}
+		if (!running) break;
+		if (g_pEngine && g_pSwap) {
+			EngineRenderFrame();
+			MsgWaitForMultipleObjects(0, nullptr, FALSE, 4, QS_ALLINPUT);
+		}
+		else WaitMessage();
 	}
 
 	if (g_bgCache) DeleteObject(g_bgCache);
 	GdiplusShutdown(g_gdiplusToken);
+	DestroyEngine();
+	ShutdownGraphics();
 	MFShutdown();
 	CoUninitialize();
 	return (int)msg.wParam;
