@@ -29,7 +29,7 @@ using std::max;
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mferror.h>
-#include <evr.h>
+//#include <evr.h>
 
 #include <string>
 #include <vector>
@@ -40,6 +40,8 @@ using std::max;
 #include <d3d11_4.h>
 #include <dxgi1_2.h>
 #include <shlwapi.h>
+
+#undef GetCurrentTime
 
 #include "resource.h"
 
@@ -74,7 +76,7 @@ enum BtdId {
 enum {HOT_NONE = -1, HOT_SEEK = 100, HOT_VOL = 101};
 
 enum {TIMER_PROGRESS = 1, TIMER_IDLE = 2, TIMER_ANIM = 3};
-#define WM_APP_SESSION_EVENT (WM_APP + 1)
+//#define WM_APP_SESSION_EVENT (WM_APP + 1)
 #define WM_APP_ENGINE_EVENT (WM_APP + 2)
 
 static const float kRates[] = { 0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f };
@@ -120,16 +122,17 @@ static HINSTANCE g_hInst = nullptr;
 static HWND g_hwndMain = nullptr, g_hwndVideo = nullptr, g_hwndCtl = nullptr;
 static UINT g_dpi = 96;
 
+/*
 static IMFMediaSession* g_pSession = nullptr;
 static IMFMediaSource* g_pSource = nullptr;
 static IMFVideoDisplayControl* g_pVideoControl = nullptr;
 static IMFSimpleAudioVolume* g_pVolume = nullptr;
 static IMFRateControl* g_pRate = nullptr;
-
+*/
 static PlayerState g_state = PlayerState::CLOSED;
 static MFTIME g_duration = 0, g_currentPos = 0;
 static bool g_hasVideo = false;
-static bool g_pauseAfterStart = false;
+//static bool g_pauseAfterStart = false;
 static DWORD g_gen = 0;
 
 static std::vector<std::wstring> g_playlist;
@@ -172,10 +175,6 @@ static std::wstring FormatTime(MFTIME t) {
 static std::wstring FileNameOf(const std::wstring& p) {
 	size_t s = p.find_last_of(L"\\/");
 	return s == std::wstring::npos ? p : p.substr(s + 1);
-}
-
-static bool CanControl() {
-	return g_pSession && g_state != PlayerState::CLOSED && g_state != PlayerState::OPEN_PENDING;
 }
 
 static void InvalidateControls() {
@@ -231,6 +230,7 @@ static void AddRecent(const std::wstring& path) {
 
 
 //Media foundation session callback
+/*
 class SessionCallback final : public IMFAsyncCallback {
 public:
 	SessionCallback(HWND hwnd, IMFMediaSession* s, DWORD gen) : m_hwnd(hwnd), m_session(s), m_gen(gen), m_cRef(1) {
@@ -306,6 +306,7 @@ private:
 };
 
 static SessionCallback* g_pCallback = nullptr;
+*/
 
 static ID3D11Device* g_pD3D = nullptr;
 static ID3D11DeviceContext* g_pD3DCtx = nullptr;
@@ -396,7 +397,16 @@ static void DestroyEngine() {
 	SafeRelease(&g_pEngineNotify);
 }
 
+static bool CanControl() {
+	return g_pEngine && g_state != PlayerState::CLOSED && g_state != PlayerState::OPEN_PENDING;
+}
+
 static void Layout();
+static void StartTimers();
+static void	ApplyVolume();
+static void ApplyRate();
+static void PlayIndex(int i);
+static void CloseSession();
 static HRESULT CreateVideoSwapChain(HWND hwnd, UINT w, UINT h);
 
 static HRESULT EngineOpen(const std::wstring& url) {
@@ -421,10 +431,10 @@ static void ResizeSwapChain(UINT w, UINT h) {
 	g_pSwap->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0);
 }
 
-static void EngineRenderFrame() {
+static void EngineRenderFrame(bool force = false) {
 	if (!g_pEngine || !g_pSwap) return;
 	LONGLONG pts = 0;
-	if (g_pEngine->OnVideoStreamTick(&pts) != S_OK) return;
+	if (g_pEngine->OnVideoStreamTick(&pts) != S_OK && !force) return;
 
 	Com<ID3D11Texture2D> back;
 	if (FAILED(g_pSwap->GetBuffer(0, IID_PPV_ARGS(back.put())))) return;
@@ -460,12 +470,26 @@ static void EngineRenderFrame() {
 	g_pSwap->Present(1, 0);
 }
 
+static void StartTimers() {
+	SetTimer(g_hwndMain, TIMER_PROGRESS, 100, nullptr);
+	if (!g_hasVideo) SetTimer(g_hwndMain, TIMER_ANIM, 40, nullptr);
+}
+
+static void KillTimers() {
+	KillTimer(g_hwndMain, TIMER_PROGRESS);
+	KillTimer(g_hwndMain, TIMER_ANIM);
+}
+
 static void HandleEngineEvent(DWORD ev) {
 	switch (ev) {
 	case MF_MEDIA_ENGINE_EVENT_LOADEDMETADATA: {
 		DWORD vw = 0, vh = 0;
 		g_pEngine->GetNativeVideoSize(&vw, &vh);
 		g_hasVideo = (vw > 0 && vh > 0);
+
+		double dur = g_pEngine->GetDuration();
+		g_duration = (dur > 0 && dur < 1e9) ? (MFTIME)(dur * 10000000.0) : 0;
+
 		Layout();
 
 		if (g_hasVideo && !g_pSwap) {
@@ -473,14 +497,38 @@ static void HandleEngineEvent(DWORD ev) {
 			GetClientRect(g_hwndVideo, &r);
 			CreateVideoSwapChain(g_hwndVideo, (UINT)max(1L, r.right), (UINT)max(1L, r.bottom));
 		}
+		ApplyVolume();
+		ApplyRate();
+		g_currentPos = 0;
 		g_pEngine->Play();
+		g_state = PlayerState::STARTED;
+		StartTimers();
+		InvalidateControls();
+		InvalidateRect(g_hwndMain, nullptr, FALSE);
+		break;
+	}
+	case MF_MEDIA_ENGINE_EVENT_ENDED: {
+		KillTimers();
+		if (g_index + 1 < (int)g_playlist.size()) PlayIndex(g_index + 1);
+		else {
+			g_pEngine->Pause();
+			g_pEngine->SetCurrentTime(0.0);
+			g_state = PlayerState::STOPPED;
+			g_currentPos = 0;
+			InvalidateControls();
+			InvalidateStage();
+		}
 		break;
 	}
 	case MF_MEDIA_ENGINE_EVENT_ERROR: {
-		wchar_t m[96];
-		swprintf_s(m, L"Media Engine error: 0x%08X", (unsigned)g_engineErr);
-		MessageBoxW(g_hwndMain, m, L"Media Player", MB_OK);
-		return;
+		std::wstring name = g_title;
+		CloseSession();
+		g_title = name;
+		wchar_t m[160];
+		swprintf_s(m, L"Playback error: 0x%08X", (unsigned)g_engineErr);
+		g_error = m;
+		InvalidateRect(g_hwndMain, nullptr, FALSE);
+		break;
 	}
 	}
 }
@@ -523,6 +571,7 @@ static void ClearSwapChain(float r, float g, float b) {
 	g_pSwap->Present(1, 0);
 }
 //Topology
+/*
 static HRESULT AddBranch(IMFTopology* topo, IMFPresentationDescriptor* pd, IMFStreamDescriptor* sd, HWND videoHwnd, bool* isVideo) {
 	
 	Com<IMFMediaTypeHandler> handler;
@@ -594,7 +643,7 @@ static HRESULT CreateTopology(IMFTopology** ppTopo, bool* hasVideo) {
 	(*ppTopo)->AddRef();
 	return S_OK;
 }
-
+*/
 
 //Layout, fullscreen and autohide
 static RECT g_stageRect = {};
@@ -618,11 +667,12 @@ static void Layout() {
 		bool show = !g_fullscreen || !g_uiHidden;
 		ShowWindow(g_hwndCtl, show ? SW_SHOWNA : SW_HIDE);
 		ResizeSwapChain((UINT)w, (UINT)stageH);
+		if (g_pEngine && g_hasVideo) EngineRenderFrame(true);
 	}
-	if (g_pVideoControl) {
+	/*if (g_pVideoControl) {
 		RECT vr = { 0, 0, w, stageH };
 		g_pVideoControl->SetVideoPosition(nullptr, &vr);
-	}
+	}*/
 	InvalidateRect(g_hwndMain, nullptr, FALSE);
 }
 
@@ -661,21 +711,17 @@ static void ToggleFullscreen() {
 
 
 //Playback control
-static void StartTimers() {
-	SetTimer(g_hwndMain, TIMER_PROGRESS, 100, nullptr);
-	if (!g_hasVideo) SetTimer(g_hwndMain, TIMER_ANIM, 40, nullptr);
-}
-
-static void KillTimers() {
-	KillTimer(g_hwndMain, TIMER_PROGRESS);
-	KillTimer(g_hwndMain, TIMER_ANIM);
-}
 
 static void ApplyVolume() {
-	if (g_pVolume) {
+	/*if (g_pVolume) {
 		g_pVolume->SetMasterVolume(g_volume);
 		g_pVolume->SetMute(g_muted ? TRUE : FALSE);
 	}
+	*/
+	if (!g_pEngine) return; 
+	g_pEngine->SetVolume((double)g_volume);
+	g_pEngine->SetMuted(g_muted ? TRUE : FALSE);
+	
 }
 
 static void SetVolume(float v) {
@@ -692,7 +738,8 @@ static void ToggleMute() {
 }
 
 static void ApplyRate() {
-	if (g_pRate) g_pRate->SetRate(FALSE, kRates[g_rateIdx]);
+	//if (g_pRate) g_pRate->SetRate(FALSE, kRates[g_rateIdx]);
+	if (g_pEngine) g_pEngine->SetPlaybackRate((double)kRates[g_rateIdx]);
 }
 
 static void SetRateIndex(int i) {
@@ -701,7 +748,7 @@ static void SetRateIndex(int i) {
 	InvalidateControls();
 }
 
-static void SessionStart(const MFTIME* pos) {
+/*static void SessionStart(const MFTIME* pos) {
 	PROPVARIANT v;
 	PropVariantInit(&v);
 	if (pos) {
@@ -711,7 +758,7 @@ static void SessionStart(const MFTIME* pos) {
 	g_pSession->Start(&GUID_NULL, &v);
 	PropVariantClear(&v);
 }
-
+*/
 static void UpdateTitle() {
 	std::wstring t = g_title.empty() ? L"Media Player" : g_title + L" - Media Player";
 	if (g_playlist.size() > 1) {
@@ -725,7 +772,16 @@ static void UpdateTitle() {
 static void CloseSession() {
 	KillTimers();
 	g_gen++;
+	DestroyEngine();
+	g_state = PlayerState::CLOSED;
+	g_duration = 0;
+	g_currentPos = 0;
+	g_hasVideo = false;
+	//g_pauseAfterStart = false;
+	Layout();
+	InvalidateControls();
 
+	/*
 	SafeRelease(&g_pVideoControl);
 	SafeRelease(&g_pVolume);
 	SafeRelease(&g_pRate);
@@ -749,14 +805,7 @@ static void CloseSession() {
 		g_pCallback->Detach();
 		SafeRelease(&g_pCallback);
 	}
-
-	g_state = PlayerState::CLOSED;
-	g_duration = 0;
-	g_currentPos = 0;
-	g_hasVideo = false;
-	g_pauseAfterStart = false;
-	Layout();
-	InvalidateControls();
+	*/
 }
 
 static HRESULT OpenURL(const std::wstring& url) {
@@ -764,8 +813,8 @@ static HRESULT OpenURL(const std::wstring& url) {
 	g_error.clear();
 	g_title = FileNameOf(url);
 
-	HRESULT hr = MFCreateMediaSession(nullptr, &g_pSession);
-
+	/*HRESULT hr = MFCreateMediaSession(nullptr, &g_pSession);
+	
 	if (SUCCEEDED(hr)) {
 		g_gen++;
 		g_pCallback = new SessionCallback(g_hwndMain, g_pSession, g_gen);
@@ -791,7 +840,8 @@ static HRESULT OpenURL(const std::wstring& url) {
 			g_hasVideo = hasVideo;
 			hr = g_pSession->SetTopology(0, topo.get());
 		}
-	}
+	}*/
+	HRESULT hr = EngineOpen(url);
 	if (SUCCEEDED(hr)) {
 		g_state = PlayerState::OPEN_PENDING;
 		Layout();
@@ -823,8 +873,10 @@ static void SetPlaylist(const std::vector<std::wstring>& files) {
 
 static void Stop() {
 	if (!CanControl() || g_state == PlayerState::STOPPED) return;
-	g_pauseAfterStart = false;
-	g_pSession->Stop();
+	//g_pauseAfterStart = false;
+	//g_pSession->Stop();
+	g_pEngine->Pause();
+	g_pEngine->SetCurrentTime(0.0);
 	g_state = PlayerState::STOPPED;
 	g_currentPos = 0;
 	KillTimers();
@@ -838,10 +890,11 @@ static void Play() {
 		return;
 	}
 	if (g_state == PlayerState::STARTED) return;
-	g_pauseAfterStart = false;
-	MFTIME zero = 0;
-	if (g_state == PlayerState::STOPPED) SessionStart(&zero);
-	else SessionStart(nullptr);
+	//g_pauseAfterStart = false;
+	//MFTIME zero = 0;
+	//if (g_state == PlayerState::STOPPED) SessionStart(&zero);
+	//else SessionStart(nullptr);
+	g_pEngine->Play();
 	g_state = PlayerState::STARTED;
 	StartTimers();
 	InvalidateControls();
@@ -849,7 +902,8 @@ static void Play() {
 
 static void Pause() {
 	if (!CanControl() || g_state != PlayerState::STARTED) return;
-	g_pSession->Pause();
+	//g_pSession->Pause();
+	g_pEngine->Pause();
 	g_state = PlayerState::PAUSED;
 	KillTimer(g_hwndMain, TIMER_PROGRESS);
 	InvalidateControls();
@@ -866,9 +920,11 @@ static void SeekTo(MFTIME pos) {
 	if (pos < 0) pos = 0;
 	if (pos > g_duration) pos = g_duration;
 	g_currentPos = pos;
-	if (g_state == PlayerState::PAUSED) g_pauseAfterStart = true;
-	SessionStart(&pos);
+	g_pEngine->SetCurrentTime((double)pos / 10000000.0);
+	/*if (g_state == PlayerState::PAUSED) g_pauseAfterStart = true;
+	SessionStart(&pos);*/
 	if (g_state == PlayerState::STOPPED) {
+		g_pEngine->Play();
 		g_state = PlayerState::STARTED;
 		StartTimers();
 	}
@@ -893,21 +949,27 @@ static void PrevTrack() {
 
 static void UpdateProgress() {
 	if (!CanControl() || g_duration <= 0 || g_state != PlayerState::STARTED || g_dragSeek) return;
-	Com<IMFClock> clock;
-	if (FAILED(g_pSession->GetClock(clock.put()))) return;
-	Com<IMFPresentationClock> pc;
-	if (FAILED(clock->QueryInterface(IID_PPV_ARGS(pc.put())))) return;
-	MFTIME pos = 0;
-	if (SUCCEEDED(pc->GetTime(&pos))) {
+	//Com<IMFClock> clock;
+	//if (FAILED(g_pSession->GetClock(clock.put()))) return;
+	//Com<IMFPresentationClock> pc;
+	//if (FAILED(clock->QueryInterface(IID_PPV_ARGS(pc.put())))) return;
+	MFTIME pos = (MFTIME)(g_pEngine->GetCurrentTime() * 10000000.0);
+	/*if (SUCCEEDED(pc->GetTime(&pos))) {
 		if (pos > g_duration) pos = g_duration;
 		MFTIME oldPos = g_currentPos;
 		g_currentPos = pos;
 		if (pos / 10000000LL != oldPos / 10000000LL)
 			InvalidateControls();
-	}
+	}*/
+	if (pos < 0) pos = 0;
+	if (pos > g_duration) pos = g_duration;
+	MFTIME oldPos = g_currentPos;
+	g_currentPos = pos;
+	if (pos / 10000000LL != oldPos / 10000000LL)
+		InvalidateControls();
 }
 
-static void HandleSessionEvent(IMFMediaEvent* ev) {
+/*static void HandleSessionEvent(IMFMediaEvent* ev) {
 	MediaEventType type = MEUnknown;
 	ev->GetType(&type);
 
@@ -984,7 +1046,7 @@ static void HandleSessionEvent(IMFMediaEvent* ev) {
 		break;
 	}
 }
-
+*/
 
 //Open file dialog(allow for multi select)
 static std::vector<std::wstring> OpenMediaFiles(HWND owner) {
@@ -1486,8 +1548,9 @@ static LRESULT CALLBACK VideoProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
 	case WM_PAINT: {
 		PAINTSTRUCT ps;
 		HDC hdc = BeginPaint(hwnd, &ps);
-		if (g_pVideoControl) g_pVideoControl->RepaintVideo();
-		else if (!g_pSwap) FillRect(hdc, &ps.rcPaint, (HBRUSH)GetStockObject(BLACK_BRUSH));
+		//if (g_pVideoControl) g_pVideoControl->RepaintVideo();
+		//if (!g_pSwap) FillRect(hdc, &ps.rcPaint, (HBRUSH)GetStockObject(BLACK_BRUSH));
+		if (!g_pSwap) FillRect(hdc, &ps.rcPaint, (HBRUSH)GetStockObject(BLACK_BRUSH));
 		EndPaint(hwnd, &ps);
 		return 0;
 	}
@@ -1915,12 +1978,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 		SetPlaylist(files);
 		return 0;
 	}
-	case WM_APP_SESSION_EVENT: {
+	/*case WM_APP_SESSION_EVENT: {
 		IMFMediaEvent* ev = reinterpret_cast<IMFMediaEvent*>(lParam);
 		if ((DWORD)wParam == g_gen && g_pSession) HandleSessionEvent(ev);
 		ev->Release();
 		return 0;
-	}
+	}*/
 	case WM_APP_ENGINE_EVENT: {
 		if ((DWORD)wParam == g_gen && g_pEngine) HandleEngineEvent((DWORD)lParam);
 		return 0;
@@ -2021,15 +2084,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 		std::vector<std::wstring> files;
 		for (int i = 1; i < argc; i++) files.push_back(argv[i]);
 		LocalFree(argv);
-		if (!files.empty()) {
+		/*		if (!files.empty()) {
 			HRESULT thr = EngineOpen(files[0]);
 			if (FAILED(thr)) {
 				wchar_t tmsg[64];
 				swprintf_s(tmsg, L"EngineOpen failed: 0x%08X", (unsigned)thr);
 				MessageBoxW(hwnd, tmsg, L"Media Player", MB_OK);
 			}
-		}
-		//SetPlaylist(files);
+		}*/
+
+		SetPlaylist(files);
 	}
 	MSG msg = {};
 	bool running = true;
