@@ -177,7 +177,17 @@ static std::wstring FileNameOf(const std::wstring& p) {
 	return s == std::wstring::npos ? p : p.substr(s + 1);
 }
 
+static void UpdateAwake() {
+	EXECUTION_STATE es = ES_CONTINUOUS;
+	if (g_state == PlayerState::STARTED) {
+		es |= ES_SYSTEM_REQUIRED;
+		if (g_hasVideo) es |= ES_DISPLAY_REQUIRED;
+	}
+	SetThreadExecutionState(es);
+}
+
 static void InvalidateControls() {
+	UpdateAwake();
 	if (g_hwndCtl) InvalidateRect(g_hwndCtl, nullptr, FALSE);
 }
 
@@ -683,6 +693,15 @@ static void ActivityPing() {
 		if (g_hwndCtl && g_fullscreen) ShowWindow(g_hwndCtl, SW_SHOWNA);
 		SetCursor(LoadCursor(nullptr, IDC_ARROW));
 	}
+}
+
+static void MouseMovePing() {
+	static POINT last = { -1, -1 };
+	POINT pt;
+	GetCursorPos(&pt);
+	if (pt.x == last.x && pt.y == last.y) return;
+	last = pt;
+	ActivityPing();
 }
 
 static void ToggleFullscreen() {
@@ -1461,7 +1480,7 @@ static LRESULT CALLBACK ControlsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
 
 	case WM_MOUSEMOVE: {
 		float x = (float)GET_X_LPARAM(lParam), y = (float)GET_Y_LPARAM(lParam);
-		ActivityPing();
+		MouseMovePing();
 		if (!g_trackingLeave) {
 			TRACKMOUSEEVENT t = { sizeof(t), TME_LEAVE, hwnd, 0 };
 			TrackMouseEvent(&t);
@@ -1861,7 +1880,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 				InvalidateRect(hwnd, &g_stageRect, FALSE);
 		}
 		else if (wParam == TIMER_IDLE) {
-			if (g_fullscreen && !g_uiHidden && g_state == PlayerState::STARTED && GetTickCount64() - g_lastActivity > 2500) {
+			if (g_fullscreen && !g_uiHidden && g_state != PlayerState::CLOSED && GetTickCount64() - g_lastActivity > 2500) {
 				POINT pt;
 				GetCursorPos(&pt);
 				RECT cr;
@@ -1883,7 +1902,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 		break;
 	}
 	case WM_MOUSEMOVE: {
-		ActivityPing();
+		MouseMovePing();
 		return 0;
 	}
 	case WM_LBUTTONDOWN: {
